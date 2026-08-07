@@ -24,12 +24,6 @@ echo "=== zhcc-web 部署开始 ==="
 # 1. 停止现有服务 & 备份 .env
 # ========================================
 echo "[1/8] 停止现有服务..."
-# 备份现有 backend/.env（跨部署保留数据库凭据等敏感配置）
-if [ -f "${APP_DIR}/backend/.env" ]; then
-  cp -f "${APP_DIR}/backend/.env" "${ENV_BACKUP}"
-  echo "       已备份 .env → ${ENV_BACKUP}"
-fi
-
 pm2 stop ${APP_NAME} 2>/dev/null || true
 pm2 delete ${APP_NAME} 2>/dev/null || true
 
