@@ -1,6 +1,6 @@
 import type { ExcelParseRule } from '../types/index.ts';
 
-const BASE = '/api/admin';
+const BASE = `${import.meta.env.BASE_URL}api/admin`.replace(/\/+$/, '');
 
 function getToken(): string | null {
   return localStorage.getItem('admin_token');

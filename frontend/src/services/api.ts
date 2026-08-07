@@ -1,6 +1,6 @@
 import type { Customer, DownstreamCustomer, Product, BatchInquiryResult, InquiryHistoryResponse, ExcelParseResult } from '../types/index.ts';
 
-const BASE = '/api';
+const BASE = `${import.meta.env.BASE_URL}api`.replace(/\/+$/, '');
 
 export async function fetchCustomers(): Promise<Customer[]> {
   const res = await fetch(`${BASE}/customers`);
