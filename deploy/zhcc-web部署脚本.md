@@ -76,37 +76,15 @@ cp -rT ${TRUNK_DIR}/${APP_NAME} ${APP_DIR}
 echo "[4/8] 配置环境变量..."
 cd ${APP_DIR}/backend
 
-# .env.production 已被 .gitignore 排除，不会随 git clone 进入仓库
-# 因此按优先级恢复：自带 .env.production > 上次备份 > 首次生成模板
 if [ -f .env.production ]; then
-  cp -f .env.production .env
+  mv -f .env.production .env
   echo "       已从 .env.production 生成 .env"
 elif [ -f "${ENV_BACKUP}" ]; then
   cp -f "${ENV_BACKUP}" .env
   echo "       已恢复上次部署的 .env"
 else
-  cat > .env <<'EOF'
-# 数据库配置（生产环境 MySQL 在本机 127.0.0.1）
-DB_HOST="127.0.0.1"
-DB_PORT=3306
-DB_USER="hitech_user"
-DB_PASSWORD="请填写真实密码"
-DB_NAME="zhcc_warehouse"
-
-# 服务端口
-PORT=8081
-
-# 后台管理账号
-ADMIN_USER=admin
-ADMIN_PASS=请填写真实密码
-ADMIN_SECRET=请填写真实密钥
-
-# 智谱 AI
-ZHIPU_API_KEY=请填写真实Key
-ZHIPU_MODEL=glm-4-flash
-EOF
-  echo "⚠️  首次部署：已生成 .env 模板"
-  echo "   请编辑 ${APP_DIR}/backend/.env 填入真实凭据后重新运行本脚本"
+  echo "❌ 未找到 .env.production 也没有历史备份，请先上传配置文件："
+  echo "   scp backend/.env.production root@<服务器IP>:${APP_DIR}/backend/.env.production"
   exit 1
 fi
 
@@ -117,11 +95,11 @@ echo "[5/8] 安装依赖并构建前端..."
 
 echo "       -- 后端依赖 --"
 cd ${APP_DIR}/backend
-npm ci
+npm install --prefer-offline 2>&1 | tail -5
 
 echo "       -- 前端依赖 --"
 cd ${APP_DIR}/frontend
-npm ci
+npm install --prefer-offline 2>&1 | tail -5
 
 echo "       -- 构建前端 --"
 npm run build
@@ -139,7 +117,6 @@ echo "       构建产物: ${APP_DIR}/frontend/dist"
 echo "[6/8] 启动 PM2 进程..."
 cd ${APP_DIR}
 
-# 生成 PM2 进程配置：后端从 backend/ 目录启动，使 dotenv 正确读取 backend/.env
 cat > ${APP_DIR}/ecosystem.config.cjs <<'EOF'
 module.exports = {
   apps: [{
@@ -167,8 +144,8 @@ echo "--- 后端健康检查（/api/health）---"
 curl -s http://localhost:8081/api/health || echo "（接口检查失败，请查看 PM2 日志：pm2 logs zhcc-web）"
 echo ""
 
-echo "--- 数据库连通检查（/api/customers）---"
-curl -s http://localhost:8081/api/customers | head -c 200 || echo "（接口检查失败）"
+echo "--- 业务接口连通检查（/api/inquiry）---"
+curl -s http://localhost:8081/api/inquiry | head -c 200 || echo "（接口检查失败）"
 echo ""
 
 pm2 list
