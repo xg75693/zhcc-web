@@ -149,9 +149,9 @@ pm2 list
 # ========================================
 echo "[8/8] 更新 Nginx 配置..."
 # nginx/nginx.conf 已包含 hitech-web 与 zhcc-web 两个 server 块，整体覆盖到 conf.d
-\cp -f ${APP_DIR}/nginx/nginx.conf ${NGINX_TARGET}
+### \cp -f ${APP_DIR}/nginx/nginx.conf ${NGINX_TARGET}
 
-nginx -t && systemctl reload nginx
+### nginx -t && systemctl reload nginx
 
 echo "=== zhcc-web 部署完成 - $(date '+%Y-%m-%d %H:%M:%S') ==="
 # ========================================
