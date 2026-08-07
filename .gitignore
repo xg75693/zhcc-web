@@ -10,6 +10,8 @@ build/
 .env
 .env.local
 .env.*.local
+.env.production
+.env.development
 
 # 日志
 logs/
@@ -30,3 +32,6 @@ pnpm-debug.log*
 
 # Claude Code 本地配置
 .claude/
+
+# qoder 本地配置
+.qoder
