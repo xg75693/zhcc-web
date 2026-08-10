@@ -1,5 +1,14 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+
+/** 获取本地日期字符串 YYYY-MM-DD（避免 UTC 时区偏差） */
+function localDateStr(d: Date = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 import {
   adminLogin,
   fetchAdminCustomers, fetchAdminDownstreamCustomers,
@@ -387,8 +396,8 @@ function ProductTab() {
                 <p className="backup-warning">此操作将执行以下关键步骤：</p>
                 <ul className="backup-steps">
                   <li>备份所有商品当前数据到备份表</li>
-                  <li>将<strong>上一个月</strong>（上月 1 日至本月初）的已冻结库存标记为「已发货」</li>
-                  <li>按公式重新计算每个商品的结存数量：<code>新结存 = 当前结存 - 上月冻结之和</code></li>
+                  <li>将<strong>本月1日之前</strong>所有已冻结库存标记为「已发货」</li>
+                  <li>按公式重新计算每个商品的结存数量：<code>新结存 = 当前结存 - 已释放冻结之和</code></li>
                 </ul>
                 <p className="backup-warning-text">此操作不可撤销，请确认后再继续。</p>
               </>
@@ -413,7 +422,7 @@ function ProductTab() {
       {backupResult && (
         <div className="backup-result">
           <p>备份成功！共备份 <strong>{backupResult.total_backed_up}</strong> 个商品，
-            上月冻结范围：<code>{backupResult.prev_month_range.start}</code> ~ <code>{backupResult.prev_month_range.end}</code>，
+            冻结截止线：<code>{backupResult.freeze_before}</code> 之前的活跃冻结已释放，
             已释放冻结数量：<strong>{backupResult.total_released_qty}</strong></p>
           <button className="btn-sm" onClick={() => setBackupResult(null)}>关闭</button>
         </div>
@@ -455,7 +464,7 @@ function StockInTab() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [editing, setEditing] = useState<StockInRecord | null>(null);
-  const [form, setForm] = useState({ customer_code: '', product_id: 0, warehouse_code: '', stock_in_date: new Date().toISOString().slice(0, 10), stock_in_qty: 0, defective_qty: 0, remark: '' });
+  const [form, setForm] = useState({ customer_code: '', product_id: 0, warehouse_code: '', stock_in_date: localDateStr(), stock_in_qty: 0, defective_qty: 0, remark: '' });
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
 
@@ -479,14 +488,14 @@ function StockInTab() {
 
   const startNew = () => {
     setEditing(null);
-    setForm({ customer_code: filterCustomer || '', product_id: 0, warehouse_code: '', stock_in_date: new Date().toISOString().slice(0, 10), stock_in_qty: 0, defective_qty: 0, remark: '' });
+    setForm({ customer_code: filterCustomer || '', product_id: 0, warehouse_code: '', stock_in_date: localDateStr(), stock_in_qty: 0, defective_qty: 0, remark: '' });
     setShowForm(true);
     if (filterCustomer) loadProducts(filterCustomer);
   };
 
   const startEdit = (r: StockInRecord) => {
     setEditing(r);
-    setForm({ customer_code: r.customer_code, product_id: r.product_id, warehouse_code: r.warehouse_code, stock_in_date: r.stock_in_date, stock_in_qty: r.stock_in_qty, defective_qty: r.defective_qty, remark: r.remark || '' });
+    setForm({ customer_code: r.customer_code, product_id: r.product_id, warehouse_code: r.warehouse_code, stock_in_date: r.stock_in_date.slice(0, 10), stock_in_qty: r.stock_in_qty, defective_qty: r.defective_qty, remark: r.remark || '' });
     setShowForm(true);
     loadProducts(r.customer_code);
   };
@@ -571,7 +580,7 @@ function StockInTab() {
             {records.map(r => (
               <tr key={r.id}>
                 <td>{r.id}</td>
-                <td>{r.stock_in_date}</td>
+                <td>{r.stock_in_date.slice(0, 10)}</td>
                 <td><code>{r.customer_code}</code> {r.customer_name ? `(${r.customer_name})` : ''}</td>
                 <td><code>{r.warehouse_code}</code></td>
                 <td>{r.product_name || '-'}</td>

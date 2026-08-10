@@ -248,7 +248,7 @@ export async function deleteStockInRecord(id: number) {
 export interface BackupResult {
   success: boolean;
   backup_date: string;
-  prev_month_range: { start: string; end: string };
+  freeze_before: string;
   total_products: number;
   total_backed_up: number;
   total_released_qty: number;

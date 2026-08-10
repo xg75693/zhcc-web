@@ -11,6 +11,8 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+  timezone: '+08:00',
+  dateStrings: true,
   authPlugins: {
     mysql_clear_password: () => () => Buffer.from(process.env.DB_PASSWORD || '')
   }

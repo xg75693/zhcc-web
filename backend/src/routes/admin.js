@@ -3,6 +3,23 @@ import pool from '../config/db.js';
 import { createHmac } from 'crypto';
 import XLSX from 'xlsx';
 
+/** 获取本地日期字符串 YYYY-MM-DD（基于服务器本地时间） */
+function localDate(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** 获取本地日期时间字符串 YYYY-MM-DD HH:mm:ss */
+function localDateTime(d = new Date()) {
+  const date = localDate(d);
+  const h = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  const s = String(d.getSeconds()).padStart(2, '0');
+  return `${date} ${h}:${min}:${s}`;
+}
+
 const router = Router();
 
 // ===== 认证 =====
@@ -625,12 +642,10 @@ router.post('/backup', authMiddleware, async (req, res) => {
   try {
     await conn.beginTransaction();
     const now = new Date();
-    const backupDate = now.toISOString().slice(0, 19).replace('T', ' ');
+    const backupDate = localDateTime();
 
-    // 计算前一个月的起止日期
-    const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const prevMonthStart = prevMonth.toISOString().slice(0, 10);
-    const prevMonthEnd = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+    // 本月1日作为截止线：处理所有在此日期之前的 active 冻结记录
+    const currentMonthStart = localDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
 
     // 查询所有商品
     const [products] = await conn.query('SELECT * FROM zhcc_product');
@@ -639,26 +654,26 @@ router.post('/backup', authMiddleware, async (req, res) => {
     let totalReleased = 0;
 
     for (const product of products) {
-      // 查询前一月份该商品的 active 冻结数量之和
-      // 注意：仅统计 status='active' 的记录，已标记为 shipped 的记录不会被重复计算
+      // 查询本月1日之前该商品所有 active 状态的冻结数量之和
+      // 仅统计 status='active' 的记录，已标记为 shipped 的不会被重复计算
       // 这确保重复执行备份时，同一冻结记录不会被多次扣除
       const [freezeResult] = await conn.query(
         `SELECT COALESCE(SUM(freeze_qty), 0) as total_frozen 
          FROM zhcc_stock_freeze 
          WHERE product_id = ? AND status = 'active' 
-           AND freeze_date >= ? AND freeze_date < ?`,
-        [product.id, prevMonthStart, prevMonthEnd]
+           AND freeze_date < ?`,
+        [product.id, currentMonthStart]
       );
       const frozenQty = Number(freezeResult[0].total_frozen) || 0;
 
-      // 将前一月份该商品的 active 冻结记录标记为 shipped
+      // 将本月1日之前该商品的 active 冻结记录标记为 shipped
       if (frozenQty > 0) {
         await conn.query(
           `UPDATE zhcc_stock_freeze 
            SET status = 'shipped', update_time = NOW(3) 
            WHERE product_id = ? AND status = 'active' 
-             AND freeze_date >= ? AND freeze_date < ?`,
-          [product.id, prevMonthStart, prevMonthEnd]
+             AND freeze_date < ?`,
+          [product.id, currentMonthStart]
         );
         totalReleased += frozenQty;
       }
@@ -687,7 +702,7 @@ router.post('/backup', authMiddleware, async (req, res) => {
       data: {
         success: true,
         backup_date: backupDate,
-        prev_month_range: { start: prevMonthStart, end: prevMonthEnd },
+        freeze_before: currentMonthStart,
         total_products: products.length,
         total_backed_up: totalBackedUp,
         total_released_qty: totalReleased,
