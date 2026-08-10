@@ -7,7 +7,7 @@ import './App.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter basename="/zhcc">
+    <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, '')}>
       <Routes>
         <Route path="/" element={<App />} />
         <Route path="/admin/*" element={<AdminApp />} />
