@@ -103,19 +103,22 @@ export async function deleteAdminDownstreamCustomer(id: number) {
 }
 
 // ===== 导出 =====
-export function exportMonthlyReport(year: number, month: number) {
+export function exportMonthlyReport(year: number, month: number, customerCode: string, customerName: string) {
   const token = getToken();
-  const url = `${BASE}/export?year=${year}&month=${month}`;
+  const url = `${BASE}/export?year=${year}&month=${month}&customer_code=${encodeURIComponent(customerCode)}`;
   // 使用 fetch 下载并带 auth
   return fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-    .then(res => {
-      if (!res.ok) throw new Error('导出失败');
+    .then(async res => {
+      if (!res.ok) {
+        const msg = await res.json().catch(() => null);
+        throw new Error(msg?.error || '导出失败');
+      }
       return res.blob();
     })
     .then(blob => {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `${year}年${month}月可订明细.xlsx`;
+      a.download = `${month}月${customerName}进出库明细.xlsx`;
       a.click();
       URL.revokeObjectURL(a.href);
     });

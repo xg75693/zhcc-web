@@ -958,12 +958,23 @@ function ExportTab() {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
+  const [customers, setCustomers] = useState<AdminCustomer[]>([]);
+  const [customerCode, setCustomerCode] = useState('');
   const [exporting, setExporting] = useState(false);
 
+  useEffect(() => {
+    fetchAdminCustomers().then(list => {
+      setCustomers(list);
+      if (list.length > 0) setCustomerCode(list[0].customer_code);
+    }).catch(() => {});
+  }, []);
+
   const handleExport = async () => {
+    if (!customerCode) return alert('请先选择客户');
+    const name = customers.find(c => c.customer_code === customerCode)?.customer_name || customerCode;
     setExporting(true);
     try {
-      await exportMonthlyReport(year, month);
+      await exportMonthlyReport(year, month, customerCode, name);
     } catch (e) {
       alert(e instanceof Error ? e.message : '导出失败');
     } finally {
@@ -977,19 +988,29 @@ function ExportTab() {
   return (
     <div className="admin-tab-panel">
       <div className="export-form">
-        <label>选择年月：</label>
+        <label>客户：</label>
+        <select value={customerCode} onChange={e => setCustomerCode(e.target.value)}>
+          {customers.map(c => (
+            <option key={c.customer_code} value={c.customer_code}>
+              {c.customer_code}（{c.customer_name}）
+            </option>
+          ))}
+        </select>
+        <label>年月：</label>
         <select value={year} onChange={e => setYear(Number(e.target.value))}>
           {years.map(y => <option key={y} value={y}>{y}年</option>)}
         </select>
         <select value={month} onChange={e => setMonth(Number(e.target.value))}>
           {months.map(m => <option key={m} value={m}>{m}月</option>)}
         </select>
-        <button className="btn-primary btn-export" onClick={handleExport} disabled={exporting}>
-          {exporting ? '导出中...' : `导出 ${year}年${month}月 可订明细`}
+        <button className="btn-primary btn-export" onClick={handleExport} disabled={exporting || !customerCode}>
+          {exporting ? '导出中...' : `导出 ${year}年${month}月 进出库明细`}
         </button>
       </div>
       <div className="export-hint">
-        导出的 Excel 文件包含该月所有已批准（可订）咨询记录的明细，格式为商品×客户矩阵布局。
+        按手工台账《N月XXX进出库明细》版式导出：左侧为商品基础信息与期初结存，
+        右侧按当月发生业务的日期横向展开，每个日期块为「入库 / 不良品 / 各收货单位出库 / 结存」，
+        当天有几家收货单位发货就生成几列，结存列为 SUM 公式。
       </div>
     </div>
   );

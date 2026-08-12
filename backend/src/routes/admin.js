@@ -2,6 +2,7 @@ import { Router } from 'express';
 import pool from '../config/db.js';
 import { createHmac } from 'crypto';
 import XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 
 /** 获取本地日期字符串 YYYY-MM-DD（基于服务器本地时间） */
 function localDate(d = new Date()) {
@@ -170,103 +171,263 @@ router.delete('/downstream-customers/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// ===== 按月导出可订明细 =====
+// ===== 按月导出进出库明细 =====
+
+/**
+ * GET /export?year=&month=&customer_code=
+ *
+ * 复刻手工台账《N月XXX进出库明细.xlsx》的版式：
+ *
+ *   A-F  商品基础信息（序号/仓储产品编号/客户编号/客户产品代码/产品名称/规格）
+ *   G    期初结存（上月末余额，不参与结存公式链——与手工表一致）
+ *   H起  按当月发生业务的日期横向展开，每块 = [入库][不良品][出库单位1..N][结存]
+ *
+ * 数值口径（与手工表一致）：
+ *   入库   = stock_in_qty（毛入库，未扣不良品）
+ *   不良品 = -defective_qty（记负数，与入库同块相加得净入库）
+ *   出库   = -request_qty（记负数）
+ *
+ * 结存列公式：SUM(上一个结存列 : 本块结存列的前一列)
+ *   —— 首块从本块入库列起算，不含 G 列期初结存
+ *   —— 手工表中 5 个空的不良品列被排除在 SUM 范围外（O/X/AE/BS/CH，均无数据），
+ *      此处统一纳入范围，逐格计算结果与手工表完全相同
+ */
 router.get('/export', authMiddleware, async (req, res) => {
   try {
-    const { year, month } = req.query;
+    const { year, month, customer_code } = req.query;
     if (!year || !month) return res.status(400).json({ error: '请选择年月' });
+    if (!customer_code) return res.status(400).json({ error: '请选择客户' });
 
     const y = parseInt(year);
     const m = parseInt(month);
     const startDate = `${y}-${String(m).padStart(2, '0')}-01`;
     const endDate = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
 
-    // 查询该月所有 approved 记录
-    const [records] = await pool.query(
-      `SELECT ir.*, c.customer_name 
-       FROM zhcc_inquiry_record ir
-       LEFT JOIN zhcc_customer c ON ir.customer_code = c.customer_code
-       WHERE ir.result = 'approved' 
-         AND ir.inquiry_date >= ? AND ir.inquiry_date < ?
-       ORDER BY ir.warehouse_code, ir.customer_code`,
-      [startDate, endDate]
+    const [customers] = await pool.query('SELECT * FROM zhcc_customer WHERE customer_code = ?', [customer_code]);
+    if (customers.length === 0) return res.status(404).json({ error: '客户不存在' });
+    const customerName = customers[0].customer_name || customers[0].customer_code;
+
+    // ===== 行：该客户全部商品，按 id 排序（与手工表顺序一致）=====
+    const [products] = await pool.query(
+      'SELECT * FROM zhcc_product WHERE customer_code = ? ORDER BY id',
+      [customer_code]
+    );
+    if (products.length === 0) return res.status(404).json({ error: '该客户下没有商品' });
+
+    // ===== 期初结存：一键备份在月初执行，记录的即上月末（= 本月初）余额 =====
+    const [backups] = await pool.query(
+      `SELECT product_id, stock_qty, backup_date FROM zhcc_product_backup
+       WHERE customer_code = ? AND backup_date < ?
+       ORDER BY backup_date ASC`,
+      [customer_code, endDate]
+    );
+    const openingInMonth = new Map(); // 本月内最早一次备份
+    const openingLatest = new Map();  // 兜底：本月之前最近一次备份
+    for (const b of backups) {
+      if (b.backup_date >= startDate) {
+        if (!openingInMonth.has(b.product_id)) openingInMonth.set(b.product_id, b.stock_qty);
+      } else {
+        openingLatest.set(b.product_id, b.stock_qty); // ASC 遍历，后写覆盖 => 最近一次
+      }
+    }
+    const openingOf = id => openingInMonth.get(id) ?? openingLatest.get(id) ?? null;
+
+    // ===== 入库 / 不良品：按 商品+日期 汇总（入库取毛数，不良品单列）=====
+    const [stockIns] = await pool.query(
+      `SELECT product_id, stock_in_date, SUM(stock_in_qty) AS in_qty, SUM(defective_qty) AS bad_qty
+       FROM zhcc_stock_in
+       WHERE customer_code = ? AND stock_in_date >= ? AND stock_in_date < ?
+       GROUP BY product_id, stock_in_date`,
+      [customer_code, startDate, endDate]
     );
 
-    // 获取所有客户（有序）
-    const [allCustomers] = await pool.query('SELECT customer_code, customer_name FROM zhcc_customer ORDER BY customer_code');
-    const customerMap = new Map();
-    allCustomers.forEach(c => customerMap.set(c.customer_code, c.customer_name || c.customer_code));
+    // ===== 出库：按 商品+日期+收货单位 汇总，只取实际成交（整批通过）的咨询 =====
+    // 列顺序 = 当天各收货单位首次咨询的先后（seq），与手工表「当天发了几家就排几列」一致
+    const [outs] = await pool.query(
+      `SELECT product_id, inquiry_date,
+              COALESCE(downstream_customer_name, '未指定') AS downstream_name,
+              SUM(request_qty) AS out_qty, MIN(id) AS seq
+       FROM zhcc_inquiry_record
+       WHERE customer_code = ? AND batch_result = 'approved' AND result = 'approved'
+         AND inquiry_date >= ? AND inquiry_date < ?
+       GROUP BY product_id, inquiry_date, downstream_customer_name
+       ORDER BY inquiry_date, seq`,
+      [customer_code, startDate, endDate]
+    );
 
-    // 获取所有商品
-    const [allProducts] = await pool.query('SELECT * FROM zhcc_product ORDER BY warehouse_code');
-
-    // 构建 product-customer 订货数量矩阵
-    const productCustomerQty = new Map(); // key: warehouseCode|customerCode -> qty
-    for (const rec of records) {
-      const key = `${rec.warehouse_code}|${rec.customer_code}`;
-      productCustomerQty.set(key, (productCustomerQty.get(key) || 0) + rec.request_qty);
+    // 每个日期下收货单位的列顺序：取该单位当天最早的记录 id
+    const nameSeq = new Map(); // date|name -> 最小 id
+    for (const o of outs) {
+      const k = `${o.inquiry_date}|${o.downstream_name}`;
+      const cur = nameSeq.get(k);
+      if (cur === undefined || o.seq < cur) nameSeq.set(k, o.seq);
     }
 
-    // 构建 Excel
-    const customerCodes = Array.from(customerMap.keys());
-    const baseCols = ['', '仓储产品编号', '客户编号', '客户产品代码', '产品名称', '规格'];
+    // ===== 日期块：入库日期 ∪ 出库日期 =====
+    const dates = [...new Set([
+      ...stockIns.map(r => r.stock_in_date),
+      ...outs.map(r => r.inquiry_date),
+    ])].sort();
+    if (dates.length === 0) return res.status(404).json({ error: `${y}年${m}月没有进出库数据` });
 
-    // Row 0: 标题行（日期）
-    const titleDate = new Date(y, m - 1, 1);
-    const titleRow = new Array(baseCols.length + customerCodes.length * 3).fill(null);
-    titleRow[4] = titleDate;
+    const BASE_COLS = 6;                 // A-F
+    const OPENING_COL = BASE_COLS;       // G 期初结存（独立一列，不入公式链）
+    let cursor = BASE_COLS + 1;          // H 起为第一个日期块
 
-    // Row 1-2: 空行
-    const emptyRow = new Array(titleRow.length).fill(null);
+    const blocks = dates.map(date => {
+      // 当天有发货的收货单位 —— 有几家就开几列，按当天首次咨询先后排序
+      const names = [...new Set(outs.filter(o => o.inquiry_date === date).map(o => o.downstream_name))]
+        .sort((a, b) => nameSeq.get(`${date}|${a}`) - nameSeq.get(`${date}|${b}`));
+      const inCol = cursor;
+      const badCol = cursor + 1;
+      const outCols = names.map((_, i) => cursor + 2 + i);
+      const balCol = cursor + 2 + names.length;
+      cursor = balCol + 1;
+      return { date, names, inCol, badCol, outCols, balCol };
+    });
+    const totalCols = cursor;
 
-    // Row 3: 表头行（客户名）
-    const headerRow3 = [...baseCols];
-    const headerRow4 = new Array(baseCols.length).fill(null);
-    for (const cc of customerCodes) {
-      const name = customerMap.get(cc);
-      headerRow3.push(name, null, null);
-      headerRow4.push('结存', '入库', '不良品');
-    }
+    // 快速查表
+    const inMap = new Map();  // product_id|date -> {in_qty, bad_qty}
+    for (const s of stockIns) inMap.set(`${s.product_id}|${s.stock_in_date}`, s);
+    const outMap = new Map(); // product_id|date|name -> qty
+    for (const o of outs) outMap.set(`${o.product_id}|${o.inquiry_date}|${o.downstream_name}`, Number(o.out_qty));
 
-    // Data rows
-    const dataRows = [];
-    let seq = 1;
-    for (const p of allProducts) {
-      const row = [seq, p.warehouse_code, p.customer_code, p.customer_product_code, p.product_name, p.spec];
-      for (const cc of customerCodes) {
-        const qty = productCustomerQty.get(`${p.warehouse_code}|${cc}`) || null;
-        row.push(null, qty || null, null); // 结存=null, 入库=qty, 不良品=null
+    // ===== 表头 =====
+    const blank = () => new Array(totalCols).fill(null);
+    const row4 = [null, '仓储产品编号', '客户编号', '客户产品代码', '产品名称', '规格'];
+
+    // ===== 数据行 =====
+    const dataRows = products.map((p, idx) => {
+      const row = blank();
+      row[0] = idx + 1;
+      row[1] = p.warehouse_code;
+      row[2] = p.customer_code;
+      row[3] = p.customer_product_code;
+      row[4] = p.product_name;
+      row[5] = p.spec;
+      row[OPENING_COL] = openingOf(p.id);
+      for (const b of blocks) {
+        const si = inMap.get(`${p.id}|${b.date}`);
+        row[b.inCol] = si && Number(si.in_qty) ? Number(si.in_qty) : null;
+        row[b.badCol] = si && Number(si.bad_qty) ? -Number(si.bad_qty) : null;
+        b.names.forEach((n, i) => {
+          const qty = outMap.get(`${p.id}|${b.date}|${n}`);
+          row[b.outCols[i]] = qty ? -qty : null;          // 出库记负数
+        });
+        // 结存列留空，稍后写入公式
       }
-      dataRows.push(row);
-      seq++;
+      return row;
+    });
+
+    // ===== 写入工作簿（样式全部照手工台账实测值还原）=====
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet(`${customerName}${m}月份明细`.slice(0, 31).replace(/[:\\/?*[\]]/g, ''), {
+      views: [{ state: 'frozen', xSplit: 6, ySplit: 5 }],   // 冻结 A-F 列 + 前 5 行
+      properties: { defaultRowHeight: 22.05, defaultColWidth: 9 },
+    });
+
+    const FONT = { name: '宋体', size: 10 };
+    const CENTER = { horizontal: 'center', vertical: 'middle' };
+    const CENTER_WRAP = { ...CENTER, wrapText: true };
+    const YELLOW = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };
+    const bd = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { style: v }]));
+
+    const put = (r, c, value, style = {}) => {
+      const cell = ws.getCell(r, c);
+      if (value !== null && value !== undefined) cell.value = value;
+      cell.font = FONT;
+      cell.alignment = style.alignment || CENTER;
+      if (style.fill) cell.fill = style.fill;
+      if (style.border) cell.border = style.border;
+      if (style.numFmt) cell.numFmt = style.numFmt;
+      return cell;
+    };
+
+    // --- 行1：月份 ---
+    // 注意：必须用 UTC 构造，否则 exceljs 按 +08:00 落盘会让日期整体前移一天
+    put(1, 5, new Date(Date.UTC(y, m - 1, 1)), { numFmt: 'yyyy"年"m"月";@' });
+
+    // --- 行3 日期 / 行4 表头（边框口径实测自手工台账，一致率 100%）---
+    const BOX = bd({ top: 'thin', left: 'thin', bottom: 'thin', right: 'thin' });
+    const HDR = bd({ top: 'thin', bottom: 'thin' });                  // 块内列：上下线
+    const HDR_END = bd({ top: 'thin', bottom: 'thin', right: 'thin' }); // 块末列：收口
+    for (let c = 1; c <= 7; c++) {
+      put(3, c, null, { alignment: CENTER_WRAP, border: BOX });
+      put(4, c, c >= 2 && c <= 6 ? row4[c - 1] : null, { alignment: CENTER_WRAP, border: BOX });
+    }
+    for (const b of blocks) {
+      const [yy, mm, dd] = b.date.split('-').map(Number);
+      // exceljs 中合并区各格共用主格样式：右框设在主格上，Excel 即在区块右缘画线收口
+      put(3, b.inCol + 1, new Date(Date.UTC(yy, mm - 1, dd)), { alignment: CENTER_WRAP, border: HDR_END, numFmt: 'm"月"d"日"' });
+      put(4, b.inCol + 1, '客户名称', { alignment: CENTER_WRAP, border: HDR_END });
+      if (b.balCol > b.inCol) {
+        ws.mergeCells(3, b.inCol + 1, 3, b.balCol + 1);
+        ws.mergeCells(4, b.inCol + 1, 4, b.balCol + 1);
+      }
     }
 
-    // 组装
-    const sheetData = [titleRow, [], [], headerRow3, headerRow4, ...dataRows];
-
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(sheetData);
-
-    // 设置列宽
-    ws['!cols'] = [
-      { wch: 4 },  // 序号
-      { wch: 16 }, // 仓储产品编号
-      { wch: 12 }, // 客户编号
-      { wch: 16 }, // 客户产品代码
-      { wch: 40 }, // 产品名称
-      { wch: 12 }, // 规格
-    ];
-    for (let i = 0; i < customerCodes.length * 3; i++) {
-      ws['!cols'].push({ wch: 8 });
+    // --- 行5：列名（入库列黄底，与手工台账一致）---
+    const B5_BASE = bd({ top: 'thin', left: 'thin', right: 'thin' });  // A-G：带左线
+    const B5 = bd({ top: 'thin', right: 'thin' });                     // 块内列
+    for (let c = 1; c <= 6; c++) put(5, c, null, { border: B5_BASE });
+    put(5, OPENING_COL + 1, '结存', { border: B5_BASE });
+    for (const b of blocks) {
+      put(5, b.inCol + 1, '入库', { border: B5, fill: YELLOW });
+      put(5, b.badCol + 1, '不良品', { border: B5, alignment: CENTER_WRAP });
+      b.names.forEach((n, i) => put(5, b.outCols[i] + 1, n, { border: B5, alignment: CENTER_WRAP }));
+      put(5, b.balCol + 1, '结存', { border: B5 });
     }
 
-    // 合并标题行
-    ws['!merges'] = [];
+    // --- 数据行 ---
+    const lastRow = 5 + dataRows.length;
+    // 右边框口径（实测手工台账）：出库列一律不画；不良品列在其右邻为出库列时不画，否则画；其余都画
+    const outColSet = new Set(blocks.flatMap(b => b.outCols.map(c => c + 1)));
+    const noRightCols = new Set(outColSet);
+    for (const b of blocks) if (b.names.length > 0) noRightCols.add(b.badCol + 1);
 
-    XLSX.utils.book_append_sheet(wb, ws, `${m}月可订明细`);
-    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    dataRows.forEach((rowData, i) => {
+      const r = 6 + i;
+      const border = {
+        left: { style: 'thin' },
+        top: { style: i === 0 ? 'medium' : 'hair' },
+        bottom: { style: r === lastRow ? 'medium' : 'hair' },
+      };
+      for (let c = 1; c <= totalCols; c++) {
+        const b = { ...border };
+        if (!noRightCols.has(c)) b.right = { style: 'thin' };
+        // 产品名称含换行时才开自动换行（与手工台账一致：单行品名不换行）
+        const wrap = c === 5 && typeof rowData[4] === 'string' && rowData[4].includes('\n');
+        put(r, c, rowData[c - 1], { border: b, alignment: wrap ? CENTER_WRAP : CENTER });
+      }
+      // 结存列公式：首块从本块入库列起算（不含 G 期初），其余从上一个结存列起算
+      blocks.forEach((b, bi) => {
+        const from = bi === 0 ? b.inCol : blocks[bi - 1].balCol;
+        ws.getCell(r, b.balCol + 1).value = {
+          formula: `SUM(${XLSX.utils.encode_col(from)}${r}:${XLSX.utils.encode_col(b.balCol - 1)}${r})`,
+        };
+      });
+    });
 
-    const filename = `${y}年${m}月可订明细.xlsx`;
+    // --- 自动筛选：与手工台账一致，挂在列名行(第5行)上 ---
+    ws.autoFilter = { from: { row: 5, column: 1 }, to: { row: lastRow, column: totalCols } };
+
+    // --- 行高 / 列宽 ---
+    ws.getRow(4).height = 36;
+    ws.getRow(5).height = 28.95;
+    const BASE_W = [4.67, 13, 13, 18.33, 37.67, 10.78];
+    BASE_W.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+    ws.getColumn(OPENING_COL + 1).width = 9;
+    for (const b of blocks) {
+      ws.getColumn(b.inCol + 1).width = 9;
+      ws.getColumn(b.badCol + 1).width = 9.89;
+      b.names.forEach((_, i) => { ws.getColumn(b.outCols[i] + 1).width = 10.38; });
+      ws.getColumn(b.balCol + 1).width = 9.67;
+    }
+
+    const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+    const filename = `${m}月${customerName}进出库明细.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
     res.send(buf);
