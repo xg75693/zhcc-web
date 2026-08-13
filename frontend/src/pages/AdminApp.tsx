@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Fragment, useCallback, useState, useEffect, useMemo, useRef } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import SearchableSelect from '../components/SearchableSelect.tsx';
 
 /** 获取本地日期字符串 YYYY-MM-DD（避免 UTC 时区偏差） */
 function localDateStr(d: Date = new Date()): string {
@@ -94,18 +95,42 @@ function LoginPage({ onLogin }: { onLogin: (token: string, username: string) => 
 }
 
 // ===== Tabs =====
+const ADMIN_TABS = [
+  { key: 'upstream', label: '客户管理' },
+  { key: 'product', label: '商品管理' },
+  { key: 'stock-in', label: '入库管理' },
+  { key: 'inquiry', label: '咨询记录管理' },
+  { key: 'downstream', label: '收货单位管理' },
+  { key: 'excel', label: 'Excel 解析规则' },
+  { key: 'export', label: '导出可订明细' },
+] as const;
+
+type AdminTabKey = (typeof ADMIN_TABS)[number]['key'];
+
 function AdminTabs() {
-  const [tab, setTab] = useState<'upstream' | 'downstream' | 'product' | 'stock-in' | 'inquiry' | 'excel' | 'export'>('upstream');
+  // 当前 Tab 存在 URL 上（?tab=xxx），刷新、收藏、前进后退都不会丢失
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const tab: AdminTabKey = ADMIN_TABS.some(t => t.key === tabParam)
+    ? (tabParam as AdminTabKey)
+    : 'upstream';
+
+  const setTab = (key: AdminTabKey) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      next.set('tab', key);
+      return next;
+    }, { replace: true });
+  };
+
   return (
     <div className="admin-tabs">
       <div className="tab-bar">
-        <button className={`tab-btn ${tab === 'upstream' ? 'active' : ''}`} onClick={() => setTab('upstream')}>客户管理</button>
-        <button className={`tab-btn ${tab === 'product' ? 'active' : ''}`} onClick={() => setTab('product')}>商品管理</button>
-        <button className={`tab-btn ${tab === 'stock-in' ? 'active' : ''}`} onClick={() => setTab('stock-in')}>入库管理</button>
-        <button className={`tab-btn ${tab === 'inquiry' ? 'active' : ''}`} onClick={() => setTab('inquiry')}>咨询记录管理</button>
-        <button className={`tab-btn ${tab === 'downstream' ? 'active' : ''}`} onClick={() => setTab('downstream')}>收货单位管理</button>
-        <button className={`tab-btn ${tab === 'excel' ? 'active' : ''}`} onClick={() => setTab('excel')}>Excel 解析规则</button>
-        <button className={`tab-btn ${tab === 'export' ? 'active' : ''}`} onClick={() => setTab('export')}>导出可订明细</button>
+        {ADMIN_TABS.map(t => (
+          <button key={t.key} className={`tab-btn ${tab === t.key ? 'active' : ''}`} onClick={() => setTab(t.key)}>
+            {t.label}
+          </button>
+        ))}
       </div>
       <div className="tab-content">
         {tab === 'upstream' && <UpstreamCustomerTab />}
@@ -271,15 +296,48 @@ function DownstreamCustomerTab() {
 }
 
 // ===== 商品管理 Tab =====
+
+/** 行内编辑用的草稿；新增行用 NEW_ROW 作为「正在编辑的行 id」 */
+const NEW_ROW = -1;
+
+interface ProductDraft {
+  warehouse_code: string;
+  customer_code: string;
+  customer_product_code: string;
+  product_name: string;
+  spec: string;
+  stock_qty: string; // 保持字符串，避免清空时被 Number('') 补成 0
+}
+
+const emptyDraft = (customerCode: string): ProductDraft => ({
+  warehouse_code: '', customer_code: customerCode, customer_product_code: '',
+  product_name: '', spec: '', stock_qty: '0',
+});
+
+const draftOf = (p: AdminProduct): ProductDraft => ({
+  warehouse_code: p.warehouse_code,
+  customer_code: p.customer_code,
+  customer_product_code: p.customer_product_code || '',
+  product_name: p.product_name || '',
+  spec: p.spec || '',
+  stock_qty: String(p.stock_qty ?? 0),
+});
+
 function ProductTab() {
   const [products, setProducts] = useState<AdminProduct[]>([]);
   const [customers, setCustomers] = useState<AdminCustomer[]>([]);
   const [filterCustomer, setFilterCustomer] = useState('');
-  const [editing, setEditing] = useState<AdminProduct | null>(null);
-  const [form, setForm] = useState({ warehouse_code: '', customer_code: '', customer_product_code: '', product_name: '', spec: '', stock_qty: 0 });
+  const [keyword, setKeyword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [showForm, setShowForm] = useState(false);
-  const [showBackupConfirm, setShowBackupConfirm] = useState(false);
+
+  // 行内编辑状态
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draft, setDraft] = useState<ProductDraft | null>(null);
+  const [baseline, setBaseline] = useState<ProductDraft | null>(null); // 进入编辑时的快照，用于判断脏值
+  const [rowError, setRowError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [flashId, setFlashId] = useState<number | null>(null);
+
   const [backupStep, setBackupStep] = useState(0); // 0: hidden, 1: first confirm, 2: second confirm
   const [backupLoading, setBackupLoading] = useState(false);
   const [backupResult, setBackupResult] = useState<BackupResult | null>(null);
@@ -297,53 +355,118 @@ function ProductTab() {
   };
   useEffect(() => { load(); }, [filterCustomer]);
 
-  const startNew = () => {
-    setEditing(null);
-    setForm({ warehouse_code: '', customer_code: filterCustomer || '', customer_product_code: '', product_name: '', spec: '', stock_qty: 0 });
-    setShowForm(true);
-  };
+  // 保存成功后的高亮，1.5s 后淡出
+  useEffect(() => {
+    if (flashId === null) return;
+    const t = setTimeout(() => setFlashId(null), 1500);
+    return () => clearTimeout(t);
+  }, [flashId]);
+
+  const isDirty = !!draft && !!baseline && (Object.keys(draft) as (keyof ProductDraft)[]).some(k => draft[k] !== baseline[k]);
+
+  const filteredProducts = useMemo(() => {
+    const kw = keyword.trim().toLowerCase();
+    if (!kw) return products;
+    return products.filter(p =>
+      (p.warehouse_code || '').toLowerCase().includes(kw) ||
+      (p.customer_product_code || '').toLowerCase().includes(kw) ||
+      (p.product_name || '').toLowerCase().includes(kw) ||
+      (p.spec || '').toLowerCase().includes(kw)
+    );
+  }, [products, keyword]);
+
+  // 正在编辑的行即使被检索条件排除也要留在列表里，否则改到一半会凭空消失
+  const visibleProducts = useMemo(() => {
+    if (editingId === null || editingId === NEW_ROW) return filteredProducts;
+    if (filteredProducts.some(p => p.id === editingId)) return filteredProducts;
+    const pinned = products.find(p => p.id === editingId);
+    return pinned ? [pinned, ...filteredProducts] : filteredProducts;
+  }, [filteredProducts, products, editingId]);
+
+  /** 切走当前编辑行前的脏值保护 */
+  const confirmDiscard = () => !isDirty || confirm('当前修改尚未保存，确定放弃？');
+
+  const closeEditor = () => { setEditingId(null); setDraft(null); setBaseline(null); setRowError(''); };
 
   const startEdit = (p: AdminProduct) => {
-    setEditing(p);
-    setForm({ warehouse_code: p.warehouse_code, customer_code: p.customer_code, customer_product_code: p.customer_product_code || '', product_name: p.product_name || '', spec: p.spec || '', stock_qty: p.stock_qty });
-    setShowForm(true);
+    if (editingId !== null && editingId !== p.id && !confirmDiscard()) return;
+    const d = draftOf(p);
+    setEditingId(p.id); setDraft(d); setBaseline(d); setRowError('');
   };
 
+  const startNew = () => {
+    if (editingId !== null && !confirmDiscard()) return;
+    const d = emptyDraft(filterCustomer || '');
+    setEditingId(NEW_ROW); setDraft(d); setBaseline(d); setRowError('');
+  };
+
+  const cancelEdit = () => closeEditor(); // 显式取消，不再二次确认
+
+  const setField = (k: keyof ProductDraft, v: string) => setDraft(d => (d ? { ...d, [k]: v } : d));
+
   const handleSave = async () => {
-    if (!form.warehouse_code.trim()) return;
-    const data = { warehouse_code: form.warehouse_code, customer_code: form.customer_code, customer_product_code: form.customer_product_code, product_name: form.product_name, spec: form.spec, stock_qty: Number(form.stock_qty) || 0 };
+    if (!draft || !draft.warehouse_code.trim()) return;
+    const payload = {
+      warehouse_code: draft.warehouse_code.trim(),
+      customer_code: draft.customer_code,
+      customer_product_code: draft.customer_product_code,
+      product_name: draft.product_name,
+      spec: draft.spec,
+      stock_qty: Number(draft.stock_qty) || 0,
+    };
+    setSaving(true); setRowError('');
     try {
-      if (editing) {
-        await updateAdminProduct(editing.id, data);
-      } else {
-        await createAdminProduct(data);
+      if (editingId === NEW_ROW) {
+        const created = await createAdminProduct(payload) as AdminProduct;
+        closeEditor();
+        await load();
+        setFlashId(created?.id ?? null);
+      } else if (editingId !== null) {
+        await updateAdminProduct(editingId, payload);
+        // 只更新这一行，不整表重拉，避免滚动位置和检索结果跳变
+        const customerName = customers.find(c => c.customer_code === payload.customer_code)?.customer_name ?? null;
+        setProducts(prev => prev.map(p => (p.id === editingId ? { ...p, ...payload, customer_name: customerName } : p)));
+        const savedId = editingId;
+        closeEditor();
+        setFlashId(savedId);
       }
-      setShowForm(false); setEditing(null);
-      await load();
-    } catch (e) { alert(e instanceof Error ? e.message : '操作失败'); }
+    } catch (e) {
+      setRowError(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRowKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); handleSave(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('确认删除此商品？')) return;
-    try { await deleteAdminProduct(id); await load(); } catch (e) { alert(e instanceof Error ? e.message : '删除失败'); }
+    try {
+      await deleteAdminProduct(id);
+      if (editingId === id) closeEditor();
+      await load();
+    } catch (e) { alert(e instanceof Error ? e.message : '删除失败'); }
   };
 
-  const handleBackupClick = () => {
-    setBackupStep(1);
-    setBackupResult(null);
+  const handleFilterCustomerChange = (code: string) => {
+    if (editingId !== null && !confirmDiscard()) return;
+    closeEditor();
+    setFilterCustomer(code);
   };
+
+  const handleBackupClick = () => { setBackupStep(1); setBackupResult(null); };
 
   const handleBackupConfirm = async () => {
-    if (backupStep === 1) {
-      setBackupStep(2);
-      return;
-    }
-    // backupStep === 2, execute
+    if (backupStep === 1) { setBackupStep(2); return; }
     setBackupLoading(true);
     try {
       const result = await executeBackup();
       setBackupResult(result);
       setBackupStep(0);
+      closeEditor();
       await load();
     } catch (e) {
       alert(e instanceof Error ? e.message : '备份失败');
@@ -352,39 +475,82 @@ function ProductTab() {
     }
   };
 
-  const cancelBackup = () => {
-    setBackupStep(0);
-    setBackupResult(null);
-  };
+  const cancelBackup = () => { setBackupStep(0); setBackupResult(null); };
+
+  // 进入编辑时聚焦并全选首个字段；回调 ref 身份稳定，只在挂载时触发一次
+  const firstFieldRef = useCallback((el: HTMLInputElement | null) => {
+    if (el) { el.focus(); el.select(); }
+  }, []);
+
+  const dupWarehouseCode = rowError.includes('仓储商品号');
+
+  /** 编辑态的单元格组 —— 新增行与编辑行共用 */
+  const renderEditCells = (d: ProductDraft) => (
+    <>
+      <td>
+        <input
+          ref={firstFieldRef}
+          className={`cell-input${dupWarehouseCode ? ' cell-input-error' : ''}`}
+          aria-invalid={dupWarehouseCode}
+          placeholder="仓储商品号"
+          value={d.warehouse_code}
+          onChange={e => setField('warehouse_code', e.target.value)}
+        />
+      </td>
+      <td>
+        <select className="cell-input" value={d.customer_code} onChange={e => setField('customer_code', e.target.value)}>
+          <option value="">选择客户</option>
+          {customers.map(c => (
+            <option key={c.id} value={c.customer_code}>{c.customer_code}{c.customer_name ? ` (${c.customer_name})` : ''}</option>
+          ))}
+        </select>
+      </td>
+      <td><input className="cell-input" placeholder="客户商品编号" value={d.customer_product_code} onChange={e => setField('customer_product_code', e.target.value)} /></td>
+      <td><input className="cell-input" placeholder="商品名称" value={d.product_name} onChange={e => setField('product_name', e.target.value)} /></td>
+      <td><input className="cell-input" placeholder="规格" value={d.spec} onChange={e => setField('spec', e.target.value)} /></td>
+      <td>
+        <input
+          className="cell-input cell-input-num"
+          type="number"
+          step={1}
+          inputMode="numeric"
+          placeholder="结存"
+          value={d.stock_qty}
+          onFocus={e => e.target.select()}
+          onChange={e => setField('stock_qty', e.target.value)}
+        />
+      </td>
+      <td className="cell-actions">
+        <button className="btn-sm btn-save" onClick={handleSave} disabled={saving || !d.warehouse_code.trim()}>
+          {saving ? '保存中' : '保存'}
+        </button>
+        <button className="btn-sm" onClick={cancelEdit} disabled={saving}>取消</button>
+      </td>
+    </>
+  );
+
+  const errorRow = rowError ? (
+    <tr className="row-error"><td colSpan={8}>{rowError}</td></tr>
+  ) : null;
 
   return (
     <div className="admin-tab-panel">
       <div className="admin-form-inline">
-        <select value={filterCustomer} onChange={e => setFilterCustomer(e.target.value)}>
+        <select value={filterCustomer} onChange={e => handleFilterCustomerChange(e.target.value)}>
           <option value="">全部客户</option>
           {customers.map(c => <option key={c.id} value={c.customer_code}>{c.customer_code} {c.customer_name ? `(${c.customer_name})` : ''}</option>)}
         </select>
-        <button className="btn-primary" onClick={startNew}>新增商品</button>
+        <input
+          className="admin-search-input"
+          type="search"
+          placeholder="搜索仓储商品号 / 客户商品编号 / 名称 / 规格"
+          value={keyword}
+          onChange={e => setKeyword(e.target.value)}
+        />
+        <button className="btn-primary" onClick={startNew} disabled={editingId === NEW_ROW}>新增商品</button>
         <button className="btn-backup" onClick={handleBackupClick} disabled={backupStep > 0}>一键备份</button>
+        <span className="admin-result-count">共 {filteredProducts.length} 条{keyword.trim() ? ` / 全部 ${products.length} 条` : ''}</span>
       </div>
-
-      {showForm && (
-        <div className="rule-form">
-          <div className="admin-form-inline" style={{ flexWrap: 'wrap' }}>
-            <select value={form.customer_code} onChange={e => setForm(f => ({ ...f, customer_code: e.target.value }))}>
-              <option value="">选择客户</option>
-              {customers.map(c => <option key={c.id} value={c.customer_code}>{c.customer_code} {c.customer_name ? `(${c.customer_name})` : ''}</option>)}
-            </select>
-            <input placeholder="仓储商品号" value={form.warehouse_code} onChange={e => setForm(f => ({ ...f, warehouse_code: e.target.value }))} />
-            <input placeholder="客户商品编号" value={form.customer_product_code} onChange={e => setForm(f => ({ ...f, customer_product_code: e.target.value }))} />
-            <input placeholder="商品名称" value={form.product_name} onChange={e => setForm(f => ({ ...f, product_name: e.target.value }))} />
-            <input placeholder="规格" value={form.spec} onChange={e => setForm(f => ({ ...f, spec: e.target.value }))} />
-            <input placeholder="结存数量" type="number" value={form.stock_qty} onChange={e => setForm(f => ({ ...f, stock_qty: Number(e.target.value) || 0 }))} />
-            <button className="btn-primary" onClick={handleSave} disabled={!form.warehouse_code.trim()}>{editing ? '保存' : '新增'}</button>
-            <button className="btn-cancel" onClick={() => { setShowForm(false); setEditing(null); }}>取消</button>
-          </div>
-        </div>
-      )}
 
       {/* 备份确认弹窗 */}
       {backupStep > 0 && (
@@ -429,27 +595,66 @@ function ProductTab() {
       )}
 
       {loading ? <div className="loading">加载中...</div> : (
-        <table className="admin-table">
+        <table className="admin-table admin-table-fixed">
+          {/* 商品名称不设宽度，吃掉剩余空间 */}
+          <colgroup>
+            <col style={{ width: '50px' }} />
+            <col style={{ width: '118px' }} />
+            <col style={{ width: '176px' }} />
+            <col style={{ width: '118px' }} />
+            <col />
+            <col style={{ width: '84px' }} />
+            <col style={{ width: '84px' }} />
+            <col style={{ width: '124px' }} />
+          </colgroup>
           <thead><tr><th>ID</th><th>仓储商品号</th><th>客户</th><th>客户商品编号</th><th>商品名称</th><th>规格</th><th>结存数量</th><th>操作</th></tr></thead>
           <tbody>
-            {products.map(p => (
-              <tr key={p.id}>
-                <td>{p.id}</td>
-                <td><code>{p.warehouse_code}</code></td>
-                <td><code>{p.customer_code}</code> {p.customer_name ? `(${p.customer_name})` : ''}</td>
-                <td>{p.customer_product_code || '-'}</td>
-                <td>{p.product_name || '-'}</td>
-                <td>{p.spec || '-'}</td>
-                <td><strong>{p.stock_qty}</strong></td>
-                <td>
-                  <button className="btn-sm" onClick={() => startEdit(p)}>编辑</button>
-                  <button className="btn-sm btn-danger" onClick={() => handleDelete(p.id)}>删除</button>
-                </td>
-              </tr>
+            {editingId === NEW_ROW && draft && (
+              <>
+                <tr className="row-editing row-new" onKeyDown={handleRowKeyDown}>
+                  <td className="cell-muted">新增</td>
+                  {renderEditCells(draft)}
+                </tr>
+                {errorRow}
+              </>
+            )}
+
+            {visibleProducts.map(p => (
+              editingId === p.id && draft ? (
+                <Fragment key={p.id}>
+                  <tr className="row-editing" onKeyDown={handleRowKeyDown}>
+                    <td>{p.id}</td>
+                    {renderEditCells(draft)}
+                  </tr>
+                  {errorRow}
+                </Fragment>
+              ) : (
+                <tr key={p.id} className={flashId === p.id ? 'row-flash' : ''}>
+                  <td>{p.id}</td>
+                  <td><code>{p.warehouse_code}</code></td>
+                  {/* 列宽截断时用 title 兜底，鼠标悬停可看全 */}
+                  <td title={`${p.customer_code}${p.customer_name ? ` (${p.customer_name})` : ''}`}><code>{p.customer_code}</code> {p.customer_name ? `(${p.customer_name})` : ''}</td>
+                  <td>{p.customer_product_code || '-'}</td>
+                  <td title={p.product_name || ''}>{p.product_name || '-'}</td>
+                  <td>{p.spec || '-'}</td>
+                  <td><strong>{p.stock_qty}</strong></td>
+                  <td className="cell-actions">
+                    <button className="btn-sm" onClick={() => startEdit(p)}>编辑</button>
+                    <button className="btn-sm btn-danger" onClick={() => handleDelete(p.id)}>删除</button>
+                  </td>
+                </tr>
+              )
             ))}
-            {products.length === 0 && <tr><td colSpan={8} className="empty-row">暂无数据</td></tr>}
+
+            {visibleProducts.length === 0 && editingId !== NEW_ROW && (
+              <tr><td colSpan={8} className="empty-row">{keyword.trim() ? '没有匹配的商品' : '暂无数据'}</td></tr>
+            )}
           </tbody>
         </table>
+      )}
+
+      {editingId !== null && (
+        <div className="edit-hint">编辑中：<kbd>Enter</kbd> 保存 · <kbd>Esc</kbd> 取消 · <kbd>Tab</kbd> 切换字段</div>
       )}
     </div>
   );
@@ -467,6 +672,8 @@ function StockInTab() {
   const [form, setForm] = useState({ customer_code: '', product_id: 0, warehouse_code: '', stock_in_date: localDateStr(), stock_in_qty: 0, defective_qty: 0, remark: '' });
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [formSeq, setFormSeq] = useState(0); // 每次打开表单自增，用于触发滚动定位
+  const formRef = useRef<HTMLDivElement>(null);
 
   const load = async () => {
     setLoading(true);
@@ -481,15 +688,28 @@ function StockInTab() {
   };
   useEffect(() => { load(); }, [filterCustomer, startDate, endDate]);
 
+  // 表单在表格上方，打开后自动滚到可视区，省去手动翻回顶部
+  useEffect(() => {
+    if (formSeq === 0) return;
+    formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [formSeq]);
+
   const loadProducts = async (customerCode: string) => {
     if (!customerCode) { setProducts([]); return; }
     try { setProducts(await fetchAdminProducts(customerCode)); } catch (e) { console.error(e); }
   };
 
+  const productOptions = useMemo(() => products.map(p => ({
+    value: String(p.id),
+    label: `${p.warehouse_code}${p.product_name ? ` - ${p.product_name}` : ''}`,
+    keywords: `${p.customer_product_code || ''} ${p.spec || ''}`,
+  })), [products]);
+
   const startNew = () => {
     setEditing(null);
     setForm({ customer_code: filterCustomer || '', product_id: 0, warehouse_code: '', stock_in_date: localDateStr(), stock_in_qty: 0, defective_qty: 0, remark: '' });
     setShowForm(true);
+    setFormSeq(n => n + 1);
     if (filterCustomer) loadProducts(filterCustomer);
   };
 
@@ -497,6 +717,7 @@ function StockInTab() {
     setEditing(r);
     setForm({ customer_code: r.customer_code, product_id: r.product_id, warehouse_code: r.warehouse_code, stock_in_date: r.stock_in_date.slice(0, 10), stock_in_qty: r.stock_in_qty, defective_qty: r.defective_qty, remark: r.remark || '' });
     setShowForm(true);
+    setFormSeq(n => n + 1);
     loadProducts(r.customer_code);
   };
 
@@ -552,16 +773,20 @@ function StockInTab() {
       </div>
 
       {showForm && (
-        <div className="rule-form">
+        <div className="rule-form" ref={formRef}>
           <div className="admin-form-inline" style={{ flexWrap: 'wrap' }}>
             <select value={form.customer_code} onChange={e => handleCustomerChange(e.target.value)}>
               <option value="">选择客户</option>
               {customers.map(c => <option key={c.id} value={c.customer_code}>{c.customer_code} {c.customer_name ? `(${c.customer_name})` : ''}</option>)}
             </select>
-            <select value={form.product_id} onChange={e => handleProductChange(Number(e.target.value))} disabled={!form.customer_code}>
-              <option value={0}>选择商品</option>
-              {products.map(p => <option key={p.id} value={p.id}>{p.warehouse_code} {p.product_name ? `- ${p.product_name}` : ''}</option>)}
-            </select>
+            <SearchableSelect
+              className="stock-in-product-select"
+              options={productOptions}
+              value={form.product_id ? String(form.product_id) : ''}
+              onChange={v => handleProductChange(Number(v) || 0)}
+              disabled={!form.customer_code}
+              placeholder={form.customer_code ? '输入编号或名称检索商品' : '请先选择客户'}
+            />
             <input type="date" value={form.stock_in_date} onChange={e => setForm(f => ({ ...f, stock_in_date: e.target.value }))} />
             <input type="number" placeholder="入库数量" value={form.stock_in_qty || ''} onChange={e => setForm(f => ({ ...f, stock_in_qty: Number(e.target.value) || 0 }))} />
             <input type="number" placeholder="不良品数量" value={form.defective_qty || ''} onChange={e => setForm(f => ({ ...f, defective_qty: Number(e.target.value) || 0 }))} />
@@ -771,9 +996,9 @@ function InquiryRecordsTab() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [expandedBatch, setExpandedBatch] = useState<string | null>(null);
-  const now = new Date();
-  const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const [month, setMonth] = useState(defaultMonth);
+  // 默认「全部」：月份下拉的选项由接口返回，进页面时列表还是空的，
+  // 若默认成当月会出现「显示全部、实际按当月过滤、结果为空」的错位
+  const [month, setMonth] = useState('');
   const [customerCode, setCustomerCode] = useState('');
   const [downstreamName, setDownstreamName] = useState('');
   const [page, setPage] = useState(1);
@@ -846,6 +1071,7 @@ function InquiryRecordsTab() {
   };
 
   const totalPages = Math.ceil(total / pageSize);
+  const downstreamOptions = useMemo(() => downstreams.map(d => ({ value: d, label: d })), [downstreams]);
 
   return (
     <div className="admin-tab-panel">
@@ -861,10 +1087,14 @@ function InquiryRecordsTab() {
           {upstreams.map(u => <option key={u.customer_code} value={u.customer_code}>{u.customer_name || u.customer_code}</option>)}
         </select>
         <label>收货单位：</label>
-        <select value={downstreamName} onChange={e => { setDownstreamName(e.target.value); setPage(1); }} style={selectStyle}>
-          <option value="">全部</option>
-          {downstreams.map(d => <option key={d} value={d}>{d}</option>)}
-        </select>
+        {/* 收货单位数量多，用可检索下拉；清空即回到「全部」 */}
+        <SearchableSelect
+          className="filter-searchable"
+          options={downstreamOptions}
+          value={downstreamName}
+          onChange={v => { setDownstreamName(v); setPage(1); }}
+          placeholder="全部"
+        />
         <span style={{ marginLeft: 'auto', color: '#6b7280', fontSize: '13px' }}>共 {total} 条记录</span>
       </div>
 

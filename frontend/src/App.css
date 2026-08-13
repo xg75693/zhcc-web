@@ -318,7 +318,9 @@ body {
 }
 
 .product-name {
-  max-width: 200px;
+  /* 原有 max-width: 200px 会把商品名硬截断，而行内右侧还空着一大片，已移除。
+     min-width: 0 让它在窄屏真的放不下时才收缩省略，而不是撑破容器 */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -433,16 +435,19 @@ body {
 
 .product-checkbox {
   display: flex;
-  align-items: flex-start;
+  /* 信息块自带 8px 上下内边距，顶对齐 + 手调 margin 会偏上 7px，直接居中对齐 */
+  align-items: center;
   gap: 10px;
   cursor: pointer;
   flex: 1;
+  /* flex 链上每一层都要能收缩，否则窄屏下长商品名撑破容器而不是省略 */
+  min-width: 0;
 }
 
 .product-checkbox input[type="checkbox"] {
-  margin-top: 3px;
   width: 16px;
   height: 16px;
+  flex-shrink: 0;
   cursor: pointer;
 }
 
@@ -452,6 +457,8 @@ body {
   gap: 8px;
   align-items: center;
   font-size: 13px;
+  /* 允许整体收缩，否则窄屏下长商品名会把列表撑出横向滚动条 */
+  min-width: 0;
 }
 
 .product-code {
@@ -572,6 +579,42 @@ body {
   outline: none;
   border-color: #4a90d9;
   box-shadow: 0 0 0 3px rgba(74,144,217,0.1);
+}
+
+/* 可检索下拉 + 独立的「新增」按钮并排 */
+.downstream-picker {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.downstream-searchable {
+  flex: 1;
+  min-width: 0;
+}
+
+.downstream-searchable .searchable-select-input {
+  padding: 10px 46px 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.downstream-searchable .searchable-select-input:focus {
+  box-shadow: 0 0 0 3px rgba(74, 144, 217, 0.1);
+}
+
+.downstream-searchable .searchable-select-option {
+  font-size: 14px;
+  padding: 9px 12px;
+}
+
+.downstream-searchable .searchable-select-caret {
+  font-size: 13px;
+  right: 12px;
+}
+
+.downstream-searchable .searchable-select-clear {
+  right: 30px;
 }
 
 .new-downstream-input {
@@ -1343,6 +1386,257 @@ body {
   border-radius: 8px;
   padding: 16px;
   margin-bottom: 16px;
+}
+
+/* ===== 表格行内编辑 ===== */
+/* 固定列宽，切换编辑态时表格不抖 */
+.admin-table-fixed {
+  table-layout: fixed;
+  width: 100%;
+}
+
+/* 单行 + 省略号：行高恒定，进出编辑态时后续行不会上下位移 */
+.admin-table-fixed td,
+.admin-table-fixed th {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.row-editing > td {
+  background: #f0f7ff;
+  vertical-align: middle;
+}
+
+.row-editing.row-new > td {
+  background: #f0fdf4;
+}
+
+.cell-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 7px;
+  border: 1px solid #c7d2e0;
+  border-radius: 4px;
+  font-size: 13px;
+  background: #fff;
+}
+
+.cell-input:focus {
+  outline: none;
+  border-color: #4a90d9;
+  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
+}
+
+.cell-input-error {
+  border-color: #dc2626;
+  background: #fef2f2;
+}
+
+.cell-input-num {
+  text-align: right;
+}
+
+.cell-actions {
+  white-space: nowrap;
+}
+
+.cell-muted {
+  color: #16a34a;
+  font-size: 12px;
+}
+
+.btn-save {
+  background: #1a73e8;
+  color: #fff;
+  border-color: #1a73e8;
+}
+
+/* 盖住 .btn-sm:hover 的蓝字规则，否则悬停时蓝底蓝字看不见 */
+.btn-save:hover {
+  background: #1557b0;
+  border-color: #1557b0;
+  color: #fff;
+}
+
+.btn-save:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.row-error > td {
+  padding: 6px 10px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+/* 保存成功后短暂高亮，指明改的是哪一行 */
+.row-flash > td {
+  animation: row-flash 1.5s ease-out;
+}
+
+@keyframes row-flash {
+  0%, 45% { background: #fef3c7; }
+  100% { background: transparent; }
+}
+
+.edit-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.edit-hint kbd {
+  padding: 1px 5px;
+  border: 1px solid #d1d5db;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #f9fafb;
+  font-family: inherit;
+  font-size: 11px;
+  color: #374151;
+}
+
+/* 列表内检索 */
+.admin-search-input {
+  min-width: 280px;
+  flex: 1 1 280px;
+}
+
+.admin-result-count {
+  margin-left: auto;
+  font-size: 13px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+/* 可检索下拉框 */
+.searchable-select {
+  position: relative;
+  display: inline-block;
+}
+
+.searchable-select-input {
+  width: 100%;
+  box-sizing: border-box;
+  /* 右侧固定留出清除按钮 + 箭头的位置，有无选中值时文字不位移 */
+  padding: 8px 44px 8px 10px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+}
+
+.searchable-select-input:focus {
+  outline: none;
+  border-color: #4a90d9;
+  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.1);
+}
+
+.searchable-select-input:disabled {
+  background: #f3f4f6;
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.searchable-select-caret {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  transform: translateY(-50%);
+  color: #9ca3af;
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none; /* 点箭头等同于点输入框 */
+  transition: transform 0.15s ease;
+}
+
+.searchable-select-caret.open {
+  transform: translateY(-50%) rotate(180deg);
+}
+
+.searchable-select-clear {
+  position: absolute;
+  top: 50%;
+  right: 26px;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.searchable-select-clear:hover {
+  background: #e5e7eb;
+  color: #4b5563;
+}
+
+.searchable-select-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  /* 允许比输入框更宽，避免长商品名被截断 */
+  min-width: 100%;
+  width: max-content;
+  max-width: 480px;
+  max-height: 260px;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+}
+
+.searchable-select-option {
+  padding: 7px 10px;
+  font-size: 13px;
+  color: #374151;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.searchable-select-option.active {
+  background: #eff6ff;
+}
+
+.searchable-select-option.selected {
+  color: #1a73e8;
+  font-weight: 600;
+}
+
+.searchable-select-empty {
+  padding: 10px;
+  font-size: 13px;
+  color: #9ca3af;
+  text-align: center;
+}
+
+.stock-in-product-select {
+  min-width: 280px;
+}
+
+/* 筛选栏里的可检索下拉，尺寸对齐同排的原生 select */
+.filter-searchable {
+  min-width: 190px;
+}
+
+.filter-searchable .searchable-select-input {
+  padding: 5px 40px 5px 8px;
+  border-radius: 6px;
+  border-color: #d1d5db;
 }
 
 .checkbox-label {

@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { Customer, DownstreamCustomer, Product, BatchInquiryResult, ExcelParseResult } from '../types/index.ts';
 import { fetchCustomers, fetchProducts, submitInquiry, fetchDownstreamCustomers, createDownstreamCustomer, confirmInquiry, cancelInquiry } from '../services/api.ts';
 import InquiryResultList from './InquiryResult.tsx';
 import ExcelUploadModal from './ExcelUploadModal.tsx';
+import SearchableSelect from './SearchableSelect.tsx';
 
 interface SelectedItem {
   customer_product_code: string;
@@ -137,6 +138,10 @@ export default function InquiryForm({ onSubmitted }: { onSubmitted: () => void }
 
   const selectedList = Array.from(selectedItems.values());
   const canSubmit = selectedCustomer && selectedDownstream && selectedItems.size > 0;
+  const downstreamOptions = useMemo(
+    () => downstreamCustomers.map(d => ({ value: String(d.id), label: d.downstream_name })),
+    [downstreamCustomers]
+  );
 
   return (
     <div className="inquiry-section">
@@ -174,34 +179,40 @@ export default function InquiryForm({ onSubmitted }: { onSubmitted: () => void }
           <div className="form-group">
             <label>收货单位</label>
             <div className="downstream-select-row">
-              <select
-                value={selectedDownstream}
-                onChange={e => {
-                  const val = e.target.value;
-                  if (val === '__new__') {
-                    setShowNewDownstream(true);
-                    setSelectedDownstream('');
-                  } else {
-                    setSelectedDownstream(val === '' ? '' : Number(val));
+              {/* 收货单位数量多，改成可检索下拉；
+                  「新增」原先藏在选项列表末尾，拆成独立按钮，避免和选择动作混在一起 */}
+              <div className="downstream-picker">
+                <SearchableSelect
+                  className="downstream-searchable"
+                  options={downstreamOptions}
+                  value={selectedDownstream === '' ? '' : String(selectedDownstream)}
+                  onChange={v => {
+                    setSelectedDownstream(v === '' ? '' : Number(v));
                     setShowNewDownstream(false);
-                  }
-                }}
-                required
-              >
-                <option value="">请选择收货单位</option>
-                {downstreamCustomers.map(d => (
-                  <option key={d.id} value={d.id}>{d.downstream_name}</option>
-                ))}
-                <option value="__new__">+ 新增收货单位</option>
-              </select>
+                  }}
+                  placeholder="输入名称检索，或点右侧展开选择"
+                />
+                <button
+                  type="button"
+                  className="add-btn"
+                  aria-expanded={showNewDownstream}
+                  onClick={() => setShowNewDownstream(s => !s)}
+                >
+                  {showNewDownstream ? '取消新增' : '+ 新增'}
+                </button>
+              </div>
               {showNewDownstream && (
                 <div className="new-downstream-input">
                   <input
                     type="text"
                     placeholder="输入收货单位名称"
+                    autoFocus
                     value={newDownstreamName}
                     onChange={e => setNewDownstreamName(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddDownstream(); } }}
+                    onKeyDown={e => {
+                      if (e.nativeEvent.isComposing) return; // 输入法组合中的回车是上屏，不提交
+                      if (e.key === 'Enter') { e.preventDefault(); handleAddDownstream(); }
+                    }}
                   />
                   <button type="button" className="add-btn" onClick={handleAddDownstream}>添加</button>
                 </div>
@@ -240,14 +251,31 @@ export default function InquiryForm({ onSubmitted }: { onSubmitted: () => void }
                         <span className="product-info">
                           <span className="product-code">{p.customer_product_code}</span>
                           <span className="product-name">{p.product_name}</span>
-                          <span className="product-spec">({p.spec})</span>
+                          {/* 规格为空时不要渲染出一对空括号 */}
+                          {p.spec && <span className="product-spec">({p.spec})</span>}
                         </span>
                       </label>
                       {isSelected && item && (
                         <div className="qty-input">
                           <label>数量:</label>
-                          <input type="number" min={1} value={item.request_qty}
-                            onChange={e => updateQty(p.customer_product_code, Number(e.target.value))} required />
+                          {/* 用 0 表示「编辑中的空值」并渲染为空串：清空后不会残留 0 被当成前缀，
+                              失焦时若仍为空则回落到 1 */}
+                          <input
+                            type="number"
+                            min={1}
+                            step={1}
+                            inputMode="numeric"
+                            value={item.request_qty === 0 ? '' : item.request_qty}
+                            onFocus={e => e.target.select()}
+                            onChange={e => {
+                              const raw = e.target.value;
+                              updateQty(p.customer_product_code, raw === '' ? 0 : Math.max(0, Math.floor(Number(raw)) || 0));
+                            }}
+                            onBlur={() => {
+                              if (item.request_qty < 1) updateQty(p.customer_product_code, 1);
+                            }}
+                            required
+                          />
                         </div>
                       )}
                     </div>
