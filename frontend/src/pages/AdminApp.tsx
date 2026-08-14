@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import SearchableSelect from '../components/SearchableSelect.tsx';
+import BackupSelectionModal from '../components/BackupSelectionModal.tsx';
 
 /** 获取本地日期字符串 YYYY-MM-DD（避免 UTC 时区偏差） */
 function localDateStr(d: Date = new Date()): string {
@@ -19,9 +20,10 @@ import {
   fetchExcelRules, createExcelRule, updateExcelRule, deleteExcelRule, setDefaultExcelRule,
   fetchAdminProducts, createAdminProduct, updateAdminProduct, deleteAdminProduct,
   fetchStockInRecords, createStockInRecord, updateStockInRecord, deleteStockInRecord,
-  executeBackup,
+  fetchBackupCandidates, executeBackup,
   fetchAdminInquiryRecords,
   type AdminCustomer, type AdminDownstreamCustomer, type AdminProduct, type StockInRecord, type BackupResult,
+  type BackupCandidates,
   type AdminInquiryRecord,
 } from '../services/adminApi';
 import type { ExcelParseRule } from '../types/index.ts';
@@ -338,7 +340,8 @@ function ProductTab() {
   const [saving, setSaving] = useState(false);
   const [flashId, setFlashId] = useState<number | null>(null);
 
-  const [backupStep, setBackupStep] = useState(0); // 0: hidden, 1: first confirm, 2: second confirm
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [backupCandidates, setBackupCandidates] = useState<BackupCandidates | null>(null);
   const [backupLoading, setBackupLoading] = useState(false);
   const [backupResult, setBackupResult] = useState<BackupResult | null>(null);
 
@@ -457,15 +460,31 @@ function ProductTab() {
     setFilterCustomer(code);
   };
 
-  const handleBackupClick = () => { setBackupStep(1); setBackupResult(null); };
-
-  const handleBackupConfirm = async () => {
-    if (backupStep === 1) { setBackupStep(2); return; }
+  const handleBackupClick = async () => {
+    setBackupResult(null);
     setBackupLoading(true);
     try {
-      const result = await executeBackup();
+      const candidates = await fetchBackupCandidates();
+      if (candidates.batches.length === 0) {
+        alert(`截止 ${candidates.freeze_before} 之前没有可备份的 active 冻结记录`);
+        return;
+      }
+      setBackupCandidates(candidates);
+      setBackupOpen(true);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '获取备份候选失败');
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const handleBackupConfirm = async (selectedInquiryIds: number[]) => {
+    setBackupLoading(true);
+    try {
+      const result = await executeBackup(selectedInquiryIds);
       setBackupResult(result);
-      setBackupStep(0);
+      setBackupOpen(false);
+      setBackupCandidates(null);
       closeEditor();
       await load();
     } catch (e) {
@@ -475,7 +494,7 @@ function ProductTab() {
     }
   };
 
-  const cancelBackup = () => { setBackupStep(0); setBackupResult(null); };
+  const cancelBackup = () => { setBackupOpen(false); setBackupCandidates(null); setBackupResult(null); };
 
   // 进入编辑时聚焦并全选首个字段；回调 ref 身份稳定，只在挂载时触发一次
   const firstFieldRef = useCallback((el: HTMLInputElement | null) => {
@@ -548,40 +567,18 @@ function ProductTab() {
           onChange={e => setKeyword(e.target.value)}
         />
         <button className="btn-primary" onClick={startNew} disabled={editingId === NEW_ROW}>新增商品</button>
-        <button className="btn-backup" onClick={handleBackupClick} disabled={backupStep > 0}>一键备份</button>
+        <button className="btn-backup" onClick={handleBackupClick} disabled={backupLoading}>一键备份</button>
         <span className="admin-result-count">共 {filteredProducts.length} 条{keyword.trim() ? ` / 全部 ${products.length} 条` : ''}</span>
       </div>
 
-      {/* 备份确认弹窗 */}
-      {backupStep > 0 && (
-        <div className="backup-overlay">
-          <div className="backup-confirm-modal">
-            <h3>⚠️ 一键备份确认</h3>
-            {backupStep === 1 && (
-              <>
-                <p className="backup-warning">此操作将执行以下关键步骤：</p>
-                <ul className="backup-steps">
-                  <li>备份所有商品当前数据到备份表</li>
-                  <li>将<strong>本月1日之前</strong>所有已冻结库存标记为「已发货」</li>
-                  <li>按公式重新计算每个商品的结存数量：<code>新结存 = 当前结存 - 已释放冻结之和</code></li>
-                </ul>
-                <p className="backup-warning-text">此操作不可撤销，请确认后再继续。</p>
-              </>
-            )}
-            {backupStep === 2 && (
-              <>
-                <p className="backup-final-confirm">请再次确认：你确定要执行一键备份吗？</p>
-                <p className="backup-warning-text">此操作将永久修改商品结存数量和冻结状态，无法撤销！</p>
-              </>
-            )}
-            <div className="backup-actions">
-              <button className="btn-cancel" onClick={cancelBackup} disabled={backupLoading}>取消</button>
-              <button className="btn-danger-confirm" onClick={handleBackupConfirm} disabled={backupLoading}>
-                {backupLoading ? '备份中...' : backupStep === 1 ? '我已了解，继续' : '确认执行备份'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* 备份选择弹窗 */}
+      {backupOpen && backupCandidates && (
+        <BackupSelectionModal
+          candidates={backupCandidates}
+          onConfirm={handleBackupConfirm}
+          onCancel={cancelBackup}
+          loading={backupLoading}
+        />
       )}
 
       {/* 备份结果提示 */}

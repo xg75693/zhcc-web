@@ -23,7 +23,8 @@ export default function InquiryForm({ onSubmitted }: { onSubmitted: () => void }
   const [showNewDownstream, setShowNewDownstream] = useState(false);
   const [productSearch, setProductSearch] = useState('');
   const [selectedItems, setSelectedItems] = useState<Map<string, SelectedItem>>(new Map());
-  const [inquiryDate, setInquiryDate] = useState(new Date().toISOString().slice(0, 10));
+  const todayLocal = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const [inquiryDate, setInquiryDate] = useState(todayLocal());
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<BatchInquiryResult | null>(null);
   const [showExcelModal, setShowExcelModal] = useState(false);

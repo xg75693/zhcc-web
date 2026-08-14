@@ -1761,6 +1761,107 @@ body {
 .btn-danger-confirm:hover { background: #b91c1c; }
 .btn-danger-confirm:disabled { background: #ccc; cursor: not-allowed; }
 
+/* 备份选择弹窗 */
+.backup-selection-modal {
+  max-width: 640px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.backup-selection-modal h3 {
+  color: #b45309;
+}
+.backup-selection-summary {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: #7c2d12;
+  margin: 12px 0;
+}
+.backup-selection-list {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px 0;
+  margin: 8px 0 16px;
+  max-height: 420px;
+}
+.backup-batch {
+  border-bottom: 1px solid #f3f4f6;
+}
+.backup-batch:last-child { border-bottom: none; }
+.backup-batch-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #f9fafb;
+  cursor: pointer;
+  font-size: 14px;
+}
+.backup-batch-header input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.backup-batch-toggle {
+  color: #6b7280;
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+}
+.backup-batch-title {
+  flex: 1;
+  color: #111827;
+  font-weight: 500;
+}
+.backup-batch-count {
+  color: #6b7280;
+  font-weight: normal;
+  margin-left: 6px;
+}
+.backup-batch-items {
+  padding: 6px 14px 10px 42px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.backup-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #374151;
+  cursor: pointer;
+}
+.backup-item input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+.backup-item-info {
+  flex: 1;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.backup-item-code {
+  font-family: monospace;
+  color: #1d4ed8;
+  min-width: 110px;
+}
+.backup-item-name {
+  flex: 1;
+}
+.backup-item-qty {
+  color: #047857;
+  min-width: 70px;
+  text-align: right;
+}
+
 /* 备份结果提示 */
 .backup-result {
   background: #ecfdf5;

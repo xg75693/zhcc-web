@@ -14,7 +14,7 @@ interface BatchGroup {
   items: InquiryRecord[];
 }
 
-export default function InquiryHistory() {
+export default function InquiryHistory({ refreshKey }: { refreshKey?: number }) {
   const [batches, setBatches] = useState<BatchGroup[]>([]);
   const [expandedBatch, setExpandedBatch] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -59,7 +59,7 @@ export default function InquiryHistory() {
 
   useEffect(() => {
     loadHistory(month);
-  }, [month]);
+  }, [month, refreshKey]);
 
   const toggleExpand = (batchId: string) => {
     setExpandedBatch(prev => prev === batchId ? null : batchId);

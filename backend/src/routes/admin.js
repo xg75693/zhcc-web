@@ -214,23 +214,19 @@ router.get('/export', authMiddleware, async (req, res) => {
     );
     if (products.length === 0) return res.status(404).json({ error: '该客户下没有商品' });
 
-    // ===== 期初结存：一键备份在月初执行，记录的即上月末（= 本月初）余额 =====
+    // ===== 期初结存：取截止日期(endDate)之前最近一次备份的 stock_qty =====
     const [backups] = await pool.query(
-      `SELECT product_id, stock_qty, backup_date FROM zhcc_product_backup
+      `SELECT product_id, stock_qty FROM zhcc_product_backup
        WHERE customer_code = ? AND backup_date < ?
        ORDER BY backup_date ASC`,
       [customer_code, endDate]
     );
-    const openingInMonth = new Map(); // 本月内最早一次备份
-    const openingLatest = new Map();  // 兜底：本月之前最近一次备份
+    const openingOfProduct = new Map();
     for (const b of backups) {
-      if (b.backup_date >= startDate) {
-        if (!openingInMonth.has(b.product_id)) openingInMonth.set(b.product_id, b.stock_qty);
-      } else {
-        openingLatest.set(b.product_id, b.stock_qty); // ASC 遍历，后写覆盖 => 最近一次
-      }
+      // ASC 遍历，后写覆盖 => 截止日期前最近一次备份
+      openingOfProduct.set(b.product_id, b.stock_qty);
     }
-    const openingOf = id => openingInMonth.get(id) ?? openingLatest.get(id) ?? null;
+    const openingOf = id => openingOfProduct.get(id) ?? null;
 
     // ===== 入库 / 不良品：按 商品+日期 汇总（入库取毛数，不良品单列）=====
     const [stockIns] = await pool.query(
@@ -241,18 +237,20 @@ router.get('/export', authMiddleware, async (req, res) => {
       [customer_code, startDate, endDate]
     );
 
-    // ===== 出库：按 商品+日期+收货单位 汇总，只取实际成交（整批通过）的咨询 =====
+    // ===== 出库：按 商品+日期+收货单位 汇总，只取实际成交（整批通过）且冻结仍 active 的咨询 =====
     // 列顺序 = 当天各收货单位首次咨询的先后（seq），与手工表「当天发了几家就排几列」一致
     const [outs] = await pool.query(
-      `SELECT product_id, inquiry_date,
-              COALESCE(downstream_customer_name, '未指定') AS downstream_name,
-              SUM(request_qty) AS out_qty, MIN(id) AS seq
-       FROM zhcc_inquiry_record
-       WHERE customer_code = ? AND batch_result = 'approved' AND result = 'approved'
-         AND inquiry_date >= ? AND inquiry_date < ?
-       GROUP BY product_id, inquiry_date, downstream_customer_name
-       ORDER BY inquiry_date, seq`,
-      [customer_code, startDate, endDate]
+      `SELECT ir.product_id, ir.inquiry_date,
+              COALESCE(ir.downstream_customer_name, '未指定') AS downstream_name,
+              SUM(sf.freeze_qty) AS out_qty, MIN(ir.id) AS seq
+       FROM zhcc_inquiry_record ir
+       INNER JOIN zhcc_stock_freeze sf ON ir.id = sf.inquiry_id
+       WHERE ir.customer_code = ? AND ir.batch_result = 'approved' AND ir.result = 'approved'
+         AND ir.inquiry_date < ?
+         AND sf.status = 'active'
+       GROUP BY ir.product_id, ir.inquiry_date, ir.downstream_customer_name
+       ORDER BY ir.inquiry_date, seq`,
+      [customer_code, endDate]
     );
 
     // 每个日期下收货单位的列顺序：取该单位当天最早的记录 id
@@ -400,9 +398,9 @@ router.get('/export', authMiddleware, async (req, res) => {
         const wrap = c === 5 && typeof rowData[4] === 'string' && rowData[4].includes('\n');
         put(r, c, rowData[c - 1], { border: b, alignment: wrap ? CENTER_WRAP : CENTER });
       }
-      // 结存列公式：首块从本块入库列起算（不含 G 期初），其余从上一个结存列起算
+      // 结存列公式：首块从 G 列期初起算，其余从上一个结存列起算
       blocks.forEach((b, bi) => {
-        const from = bi === 0 ? b.inCol : blocks[bi - 1].balCol;
+        const from = bi === 0 ? OPENING_COL : blocks[bi - 1].balCol;
         ws.getCell(r, b.balCol + 1).value = {
           formula: `SUM(${XLSX.utils.encode_col(from)}${r}:${XLSX.utils.encode_col(b.balCol - 1)}${r})`,
         };
@@ -792,70 +790,145 @@ router.delete('/stock-in/:id', authMiddleware, async (req, res) => {
 // ===== 一键备份 =====
 
 /**
+ * GET /backup-candidates
+ * 返回本月1日之前所有 active 冻结记录，按咨询批次分组，供前端选择
+ */
+router.get('/backup-candidates', authMiddleware, async (req, res) => {
+  try {
+    const currentMonthStart = localDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+
+    const [rows] = await pool.query(
+      `SELECT
+         sf.inquiry_id,
+         sf.batch_id,
+         ir.inquiry_date,
+         COALESCE(ir.downstream_customer_name, '未指定') AS downstream_customer_name,
+         sf.product_id,
+         p.warehouse_code,
+         p.customer_code,
+         p.customer_product_code,
+         p.product_name,
+         p.spec,
+         SUM(sf.freeze_qty) AS freeze_qty,
+         sf.freeze_date
+       FROM zhcc_stock_freeze sf
+       LEFT JOIN zhcc_inquiry_record ir ON sf.inquiry_id = ir.id
+       LEFT JOIN zhcc_product p ON sf.product_id = p.id
+       WHERE sf.status = 'active' AND sf.freeze_date < ? AND sf.inquiry_id IS NOT NULL
+       GROUP BY sf.inquiry_id, sf.batch_id, ir.inquiry_date, ir.downstream_customer_name,
+                sf.product_id, p.warehouse_code, p.customer_code, p.customer_product_code,
+                p.product_name, p.spec, sf.freeze_date
+       ORDER BY sf.batch_id, sf.inquiry_id`,
+      [currentMonthStart]
+    );
+
+    const batchMap = new Map();
+    for (const r of rows) {
+      if (!batchMap.has(r.batch_id)) {
+        batchMap.set(r.batch_id, {
+          batch_id: r.batch_id,
+          inquiry_date: r.inquiry_date,
+          downstream_customer_name: r.downstream_customer_name,
+          items: []
+        });
+      }
+      batchMap.get(r.batch_id).items.push({
+        inquiry_id: r.inquiry_id,
+        product_id: r.product_id,
+        warehouse_code: r.warehouse_code,
+        customer_code: r.customer_code,
+        customer_product_code: r.customer_product_code,
+        product_name: r.product_name,
+        spec: r.spec,
+        freeze_qty: Number(r.freeze_qty) || 0,
+        freeze_date: r.freeze_date
+      });
+    }
+
+    res.json({
+      data: {
+        freeze_before: currentMonthStart,
+        batches: Array.from(batchMap.values())
+      }
+    });
+  } catch (err) {
+    console.error('[BACKUP CANDIDATES ERROR]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * POST /backup
- * 1. 查询所有商品，对每个商品计算前一月份的冻结数量之和
- * 2. 将前一月份的 active 冻结记录标记为 shipped（已发货）
- * 3. 更新商品表的 stock_qty：减去已发货的冻结数量
- * 4. 将商品数据复制到 zhcc_product_backup 表，带上备份日期
+ * 1. 根据前端传入的 selected_inquiry_ids 找到关联的 active 冻结记录
+ * 2. 将选中的 active 冻结记录标记为 shipped（已发货）
+ * 3. 按商品汇总扣减 stock_qty
+ * 4. 将处理后的商品数据写入 zhcc_product_backup 表
  */
 router.post('/backup', authMiddleware, async (req, res) => {
+  const { selected_inquiry_ids } = req.body;
+  if (!Array.isArray(selected_inquiry_ids) || selected_inquiry_ids.length === 0) {
+    return res.status(400).json({ error: '请至少选择一条需要备份的记录' });
+  }
+
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    const now = new Date();
     const backupDate = localDateTime();
 
-    // 本月1日作为截止线：处理所有在此日期之前的 active 冻结记录
+    // 本月1日作为截止线：只处理在此日期之前的 active 冻结记录
     const currentMonthStart = localDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
 
-    // 查询所有商品
-    const [products] = await conn.query('SELECT * FROM zhcc_product');
+    // 1. 查询选中的咨询记录关联的 active 冻结记录，按商品汇总
+    const [freezeRows] = await conn.query(
+      `SELECT product_id, COALESCE(SUM(freeze_qty), 0) AS total_frozen
+       FROM zhcc_stock_freeze
+       WHERE inquiry_id IN (?) AND status = 'active' AND freeze_date < ?
+       GROUP BY product_id`,
+      [selected_inquiry_ids, currentMonthStart]
+    );
 
+    if (freezeRows.length === 0) {
+      await conn.rollback();
+      return res.status(400).json({ error: '选中的记录在截止线之前没有可发货的冻结库存' });
+    }
+
+    // 2. 将选中的冻结记录标记为 shipped
+    await conn.query(
+      `UPDATE zhcc_stock_freeze
+       SET status = 'shipped', update_time = NOW(3)
+       WHERE inquiry_id IN (?) AND status = 'active' AND freeze_date < ?`,
+      [selected_inquiry_ids, currentMonthStart]
+    );
+
+    // 3. 按商品扣减结存并写入备份表
     let totalBackedUp = 0;
     let totalReleased = 0;
 
-    for (const product of products) {
-      // 查询本月1日之前该商品所有 active 状态的冻结数量之和
-      // 仅统计 status='active' 的记录，已标记为 shipped 的不会被重复计算
-      // 这确保重复执行备份时，同一冻结记录不会被多次扣除
-      const [freezeResult] = await conn.query(
-        `SELECT COALESCE(SUM(freeze_qty), 0) as total_frozen 
-         FROM zhcc_stock_freeze 
-         WHERE product_id = ? AND status = 'active' 
-           AND freeze_date < ?`,
-        [product.id, currentMonthStart]
-      );
-      const frozenQty = Number(freezeResult[0].total_frozen) || 0;
+    for (const row of freezeRows) {
+      const productId = row.product_id;
+      const frozenQty = Number(row.total_frozen) || 0;
+      if (frozenQty <= 0) continue;
 
-      // 将本月1日之前该商品的 active 冻结记录标记为 shipped
-      if (frozenQty > 0) {
-        await conn.query(
-          `UPDATE zhcc_stock_freeze 
-           SET status = 'shipped', update_time = NOW(3) 
-           WHERE product_id = ? AND status = 'active' 
-             AND freeze_date < ?`,
-          [product.id, currentMonthStart]
-        );
-        totalReleased += frozenQty;
-      }
+      const [productRows] = await conn.query('SELECT * FROM zhcc_product WHERE id = ?', [productId]);
+      if (productRows.length === 0) continue;
+      const product = productRows[0];
 
-      // 计算新的结存数量：原始 stock_qty - 已发货冻结
       const newStockQty = product.stock_qty - frozenQty;
 
-      // 更新商品表的结存数量
       await conn.query(
         'UPDATE zhcc_product SET stock_qty = ?, update_time = NOW(3) WHERE id = ?',
         [newStockQty, product.id]
       );
 
-      // 写入备份表
       await conn.query(
-        `INSERT INTO zhcc_product_backup 
-          (backup_date, product_id, warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty, frozen_qty, create_time) 
+        `INSERT INTO zhcc_product_backup
+          (backup_date, product_id, warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty, frozen_qty, create_time)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
         [backupDate, product.id, product.warehouse_code, product.customer_code, product.customer_product_code, product.product_name, product.spec, newStockQty, frozenQty]
       );
+
       totalBackedUp++;
+      totalReleased += frozenQty;
     }
 
     await conn.commit();
@@ -864,7 +937,7 @@ router.post('/backup', authMiddleware, async (req, res) => {
         success: true,
         backup_date: backupDate,
         freeze_before: currentMonthStart,
-        total_products: products.length,
+        total_products: totalBackedUp,
         total_backed_up: totalBackedUp,
         total_released_qty: totalReleased,
       }

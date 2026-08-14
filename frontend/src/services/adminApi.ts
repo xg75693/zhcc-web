@@ -248,6 +248,30 @@ export async function deleteStockInRecord(id: number) {
 }
 
 // ===== 一键备份 =====
+export interface BackupCandidateItem {
+  inquiry_id: number;
+  product_id: number;
+  warehouse_code: string;
+  customer_code: string;
+  customer_product_code: string | null;
+  product_name: string | null;
+  spec: string | null;
+  freeze_qty: number;
+  freeze_date: string;
+}
+
+export interface BackupCandidateBatch {
+  batch_id: string;
+  inquiry_date: string;
+  downstream_customer_name: string;
+  items: BackupCandidateItem[];
+}
+
+export interface BackupCandidates {
+  freeze_before: string;
+  batches: BackupCandidateBatch[];
+}
+
 export interface BackupResult {
   success: boolean;
   backup_date: string;
@@ -277,8 +301,15 @@ export interface ProductBackupRecord {
   customer_name: string | null;
 }
 
-export async function executeBackup(): Promise<BackupResult> {
-  return request(`${BASE}/backup`, { method: 'POST' });
+export async function fetchBackupCandidates(): Promise<BackupCandidates> {
+  return request(`${BASE}/backup-candidates`);
+}
+
+export async function executeBackup(selectedInquiryIds: number[]): Promise<BackupResult> {
+  return request(`${BASE}/backup`, {
+    method: 'POST',
+    body: JSON.stringify({ selected_inquiry_ids: selectedInquiryIds }),
+  });
 }
 
 export async function fetchBackups(backupDate?: string): Promise<{ records: ProductBackupRecord[]; backup_dates: BackupDateSummary[] }> {
