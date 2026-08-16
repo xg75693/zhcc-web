@@ -698,7 +698,7 @@ function StockInTab() {
 
   const productOptions = useMemo(() => products.map(p => ({
     value: String(p.id),
-    label: `${p.warehouse_code}${p.product_name ? ` - ${p.product_name}` : ''}`,
+    label: `${p.warehouse_code}${p.product_name ? ` - ${p.product_name}` : ''}${p.spec ? ` / ${p.spec}` : ''}`,
     keywords: `${p.customer_product_code || ''} ${p.spec || ''}`,
   })), [products]);
 
