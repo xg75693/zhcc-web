@@ -2,6 +2,8 @@ import { Fragment, useCallback, useState, useEffect, useMemo, useRef } from 'rea
 import { Link, useSearchParams } from 'react-router-dom';
 import SearchableSelect from '../components/SearchableSelect.tsx';
 import BackupSelectionModal from '../components/BackupSelectionModal.tsx';
+import CategoryManageModal from '../components/CategoryManageModal.tsx';
+import CategorySelect from '../components/CategorySelect.tsx';
 
 /** 获取本地日期字符串 YYYY-MM-DD（避免 UTC 时区偏差） */
 function localDateStr(d: Date = new Date()): string {
@@ -19,11 +21,12 @@ import {
   exportMonthlyReport,
   fetchExcelRules, createExcelRule, updateExcelRule, deleteExcelRule, setDefaultExcelRule,
   fetchAdminProducts, createAdminProduct, updateAdminProduct, deleteAdminProduct,
+  fetchAdminCategories,
   fetchStockInRecords, createStockInRecord, updateStockInRecord, deleteStockInRecord,
   fetchBackupCandidates, executeBackup,
   fetchAdminInquiryRecords,
   type AdminCustomer, type AdminDownstreamCustomer, type AdminProduct, type StockInRecord, type BackupResult,
-  type BackupCandidates,
+  type BackupCandidates, type AdminProductCategory,
   type AdminInquiryRecord,
 } from '../services/adminApi';
 import type { ExcelParseRule } from '../types/index.ts';
@@ -308,12 +311,13 @@ interface ProductDraft {
   customer_product_code: string;
   product_name: string;
   spec: string;
-  stock_qty: string; // 保持字符串，避免清空时被 Number('') 补成 0
+  category_id: string; // 与 select 的 value 对齐，提交前转数字
+  stock_qty: string;   // 保持字符串，避免清空时被 Number('') 补成 0
 }
 
 const emptyDraft = (customerCode: string): ProductDraft => ({
   warehouse_code: '', customer_code: customerCode, customer_product_code: '',
-  product_name: '', spec: '', stock_qty: '0',
+  product_name: '', spec: '', category_id: '', stock_qty: '0',
 });
 
 const draftOf = (p: AdminProduct): ProductDraft => ({
@@ -322,13 +326,18 @@ const draftOf = (p: AdminProduct): ProductDraft => ({
   customer_product_code: p.customer_product_code || '',
   product_name: p.product_name || '',
   spec: p.spec || '',
+  category_id: p.category_id ? String(p.category_id) : '',
   stock_qty: String(p.stock_qty ?? 0),
 });
 
 function ProductTab() {
   const [products, setProducts] = useState<AdminProduct[]>([]);
   const [customers, setCustomers] = useState<AdminCustomer[]>([]);
+  const [categories, setCategories] = useState<AdminProductCategory[]>([]);
   const [filterCustomer, setFilterCustomer] = useState('');
+  // 类别按客户隔离，"全部客户"视图下同名类别可能分属多个客户，所以筛选按名称而不是 id
+  const [filterCategory, setFilterCategory] = useState('');
+  const [categoryModalOpen, setCategoryModalOpen] = useState(false);
   const [keyword, setKeyword] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -348,11 +357,12 @@ function ProductTab() {
   const load = async () => {
     setLoading(true);
     try {
-      const [p, c] = await Promise.all([
+      const [p, c, cat] = await Promise.all([
         fetchAdminProducts(filterCustomer || undefined),
-        fetchAdminCustomers()
+        fetchAdminCustomers(),
+        fetchAdminCategories(filterCustomer || undefined),
       ]);
-      setProducts(p); setCustomers(c);
+      setProducts(p); setCustomers(c); setCategories(cat);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   };
@@ -367,16 +377,33 @@ function ProductTab() {
 
   const isDirty = !!draft && !!baseline && (Object.keys(draft) as (keyof ProductDraft)[]).some(k => draft[k] !== baseline[k]);
 
+  /** 编辑行里可选的类别：只能是该商品所属客户名下的 */
+  const categoriesOf = useCallback(
+    (customerCode: string) => categories.filter(c => c.customer_code === customerCode),
+    [categories]
+  );
+
+  /**
+   * 类别筛选只在选定客户后可用 —— 类别按客户隔离，"全部客户"下并没有一份通用的类别表。
+   * 选项即所选客户名下的类别（categories 已随 filterCustomer 拉取）。
+   */
+  const categoryFilterEnabled = !!filterCustomer;
+  const categoryNameOptions = useMemo(
+    () => [...new Set(categories.map(c => c.category_name))].sort((a, b) => a.localeCompare(b, 'zh')),
+    [categories]
+  );
+
   const filteredProducts = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
-    if (!kw) return products;
-    return products.filter(p =>
-      (p.warehouse_code || '').toLowerCase().includes(kw) ||
-      (p.customer_product_code || '').toLowerCase().includes(kw) ||
-      (p.product_name || '').toLowerCase().includes(kw) ||
-      (p.spec || '').toLowerCase().includes(kw)
-    );
-  }, [products, keyword]);
+    return products.filter(p => {
+      if (filterCategory && (p.category_name || '') !== filterCategory) return false;
+      if (!kw) return true;
+      return (p.warehouse_code || '').toLowerCase().includes(kw) ||
+        (p.customer_product_code || '').toLowerCase().includes(kw) ||
+        (p.product_name || '').toLowerCase().includes(kw) ||
+        (p.spec || '').toLowerCase().includes(kw);
+    });
+  }, [products, keyword, filterCategory]);
 
   // 正在编辑的行即使被检索条件排除也要留在列表里，否则改到一半会凭空消失
   const visibleProducts = useMemo(() => {
@@ -397,15 +424,29 @@ function ProductTab() {
     setEditingId(p.id); setDraft(d); setBaseline(d); setRowError('');
   };
 
+  const defaultCategoryIdOf = useCallback(
+    (customerCode: string) => {
+      const hit = categories.find(c => c.customer_code === customerCode && c.is_default);
+      return hit ? String(hit.id) : '';
+    },
+    [categories]
+  );
+
   const startNew = () => {
     if (editingId !== null && !confirmDiscard()) return;
-    const d = emptyDraft(filterCustomer || '');
+    const customerCode = filterCustomer || '';
+    const d = { ...emptyDraft(customerCode), category_id: defaultCategoryIdOf(customerCode) };
     setEditingId(NEW_ROW); setDraft(d); setBaseline(d); setRowError('');
   };
 
   const cancelEdit = () => closeEditor(); // 显式取消，不再二次确认
 
-  const setField = (k: keyof ProductDraft, v: string) => setDraft(d => (d ? { ...d, [k]: v } : d));
+  const setField = (k: keyof ProductDraft, v: string) => setDraft(d => {
+    if (!d) return d;
+    // 类别按客户隔离，换客户后原类别不再可选，直接落到新客户的默认分类
+    if (k === 'customer_code') return { ...d, customer_code: v, category_id: defaultCategoryIdOf(v) };
+    return { ...d, [k]: v };
+  });
 
   const handleSave = async () => {
     if (!draft || !draft.warehouse_code.trim()) return;
@@ -415,6 +456,7 @@ function ProductTab() {
       customer_product_code: draft.customer_product_code,
       product_name: draft.product_name,
       spec: draft.spec,
+      category_id: Number(draft.category_id) || null,
       stock_qty: Number(draft.stock_qty) || 0,
     };
     setSaving(true); setRowError('');
@@ -425,10 +467,17 @@ function ProductTab() {
         await load();
         setFlashId(created?.id ?? null);
       } else if (editingId !== null) {
-        await updateAdminProduct(editingId, payload);
+        // 后端会把不属于该客户的类别落回默认分类，以返回值为准
+        const saved = await updateAdminProduct(editingId, payload) as { category_id: number | null };
         // 只更新这一行，不整表重拉，避免滚动位置和检索结果跳变
         const customerName = customers.find(c => c.customer_code === payload.customer_code)?.customer_name ?? null;
-        setProducts(prev => prev.map(p => (p.id === editingId ? { ...p, ...payload, customer_name: customerName } : p)));
+        const categoryId = saved?.category_id ?? payload.category_id;
+        const categoryName = categories.find(c => c.id === categoryId)?.category_name ?? null;
+        setProducts(prev => prev.map(p => (
+          p.id === editingId
+            ? { ...p, ...payload, category_id: categoryId, category_name: categoryName, customer_name: customerName }
+            : p
+        )));
         const savedId = editingId;
         closeEditor();
         setFlashId(savedId);
@@ -458,6 +507,8 @@ function ProductTab() {
     if (editingId !== null && !confirmDiscard()) return;
     closeEditor();
     setFilterCustomer(code);
+    // 类别按客户隔离，换客户后原类别名不再适用，回到「全部类别」
+    setFilterCategory('');
   };
 
   const handleBackupClick = async () => {
@@ -524,6 +575,24 @@ function ProductTab() {
           ))}
         </select>
       </td>
+      <td>
+        {/* 只列出所属客户名下的类别；没选客户时无类别可选 */}
+        <select
+          className="cell-input"
+          value={d.category_id}
+          onChange={e => setField('category_id', e.target.value)}
+          disabled={!d.customer_code}
+          title={d.customer_code ? '' : '请先选择客户'}
+        >
+          {/* 占位项只在没选中类别时出现，免得和列表里真实的「默认分类」重名 */}
+          {!d.category_id && (
+            <option value="">{d.customer_code ? '（自动归入默认分类）' : '先选客户'}</option>
+          )}
+          {categoriesOf(d.customer_code).map(c => (
+            <option key={c.id} value={c.id}>{c.category_name}</option>
+          ))}
+        </select>
+      </td>
       <td><input className="cell-input" placeholder="客户商品编号" value={d.customer_product_code} onChange={e => setField('customer_product_code', e.target.value)} /></td>
       <td><input className="cell-input" placeholder="商品名称" value={d.product_name} onChange={e => setField('product_name', e.target.value)} /></td>
       <td><input className="cell-input" placeholder="规格" value={d.spec} onChange={e => setField('spec', e.target.value)} /></td>
@@ -549,7 +618,7 @@ function ProductTab() {
   );
 
   const errorRow = rowError ? (
-    <tr className="row-error"><td colSpan={8}>{rowError}</td></tr>
+    <tr className="row-error"><td colSpan={9}>{rowError}</td></tr>
   ) : null;
 
   return (
@@ -559,6 +628,15 @@ function ProductTab() {
           <option value="">全部客户</option>
           {customers.map(c => <option key={c.id} value={c.customer_code}>{c.customer_code} {c.customer_name ? `(${c.customer_name})` : ''}</option>)}
         </select>
+        {/* 「管理」按钮嵌在下拉列表第一项「全部类别」的右侧，见 CategorySelect */}
+        <CategorySelect
+          options={categoryFilterEnabled ? categoryNameOptions : []}
+          value={filterCategory}
+          onChange={setFilterCategory}
+          onManage={() => setCategoryModalOpen(true)}
+          disabled={!categoryFilterEnabled}
+          disabledTitle="请先选择客户"
+        />
         <input
           className="admin-search-input"
           type="search"
@@ -568,8 +646,22 @@ function ProductTab() {
         />
         <button className="btn-primary" onClick={startNew} disabled={editingId === NEW_ROW}>新增商品</button>
         <button className="btn-backup" onClick={handleBackupClick} disabled={backupLoading}>一键备份</button>
-        <span className="admin-result-count">共 {filteredProducts.length} 条{keyword.trim() ? ` / 全部 ${products.length} 条` : ''}</span>
+        <span className="admin-result-count">
+          共 {filteredProducts.length} 条{filteredProducts.length !== products.length ? ` / 全部 ${products.length} 条` : ''}
+        </span>
       </div>
+
+      {categoryModalOpen && (
+        <CategoryManageModal
+          customers={customers}
+          initialCustomerCode={filterCustomer}
+          onClose={changed => {
+            setCategoryModalOpen(false);
+            // 类别被改名或删除后，商品行上的类别名可能已过期，需要重拉
+            if (changed) { setFilterCategory(''); load(); }
+          }}
+        />
+      )}
 
       {/* 备份选择弹窗 */}
       {backupOpen && backupCandidates && (
@@ -598,13 +690,14 @@ function ProductTab() {
             <col style={{ width: '50px' }} />
             <col style={{ width: '118px' }} />
             <col style={{ width: '176px' }} />
+            <col style={{ width: '104px' }} />
             <col style={{ width: '118px' }} />
             <col />
             <col style={{ width: '84px' }} />
             <col style={{ width: '84px' }} />
             <col style={{ width: '124px' }} />
           </colgroup>
-          <thead><tr><th>ID</th><th>仓储商品号</th><th>客户</th><th>客户商品编号</th><th>商品名称</th><th>规格</th><th>结存数量</th><th>操作</th></tr></thead>
+          <thead><tr><th>ID</th><th>仓储商品号</th><th>客户</th><th>类别</th><th>客户商品编号</th><th>商品名称</th><th>规格</th><th>结存数量</th><th>操作</th></tr></thead>
           <tbody>
             {editingId === NEW_ROW && draft && (
               <>
@@ -631,6 +724,7 @@ function ProductTab() {
                   <td><code>{p.warehouse_code}</code></td>
                   {/* 列宽截断时用 title 兜底，鼠标悬停可看全 */}
                   <td title={`${p.customer_code}${p.customer_name ? ` (${p.customer_name})` : ''}`}><code>{p.customer_code}</code> {p.customer_name ? `(${p.customer_name})` : ''}</td>
+                  <td title={p.category_name || ''}>{p.category_name || '-'}</td>
                   <td>{p.customer_product_code || '-'}</td>
                   <td title={p.product_name || ''}>{p.product_name || '-'}</td>
                   <td>{p.spec || '-'}</td>
@@ -644,7 +738,7 @@ function ProductTab() {
             ))}
 
             {visibleProducts.length === 0 && editingId !== NEW_ROW && (
-              <tr><td colSpan={8} className="empty-row">{keyword.trim() ? '没有匹配的商品' : '暂无数据'}</td></tr>
+              <tr><td colSpan={9} className="empty-row">{keyword.trim() || filterCategory ? '没有匹配的商品' : '暂无数据'}</td></tr>
             )}
           </tbody>
         </table>
@@ -1236,8 +1330,10 @@ function ExportTab() {
       </div>
       <div className="export-hint">
         按手工台账《N月XXX进出库明细》版式导出：左侧为商品基础信息与期初结存，
-        右侧按当月发生业务的日期横向展开，每个日期块为「入库 / 不良品 / 各收货单位出库 / 结存」，
-        当天有几家收货单位发货就生成几列，结存列为 SUM 公式。
+        商品按分类排序、同分类在「产品分类」列合并单元格；
+        右侧按当月发生业务的日期横向展开，每个日期块为「入库 / 各收货单位出库 / 结存」，
+        入库列为净入库（已扣不良品），当天有几家收货单位发货就生成几列，结存列为 SUM 公式，
+        末行为 H 列起各列的纵向合计。
       </div>
     </div>
   );

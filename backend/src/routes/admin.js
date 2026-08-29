@@ -85,6 +85,8 @@ router.post('/customers', authMiddleware, async (req, res) => {
       'INSERT INTO zhcc_customer (customer_code, customer_name, create_time, update_time) VALUES (?, ?, NOW(3), NOW(3))',
       [customer_code, customer_name || null]
     );
+    // 类别按客户隔离，新客户先备好默认分类，之后建商品才有兜底去处
+    await ensureDefaultCategory(pool, customer_code);
     res.json({ data: { id: result.insertId, customer_code, customer_name } });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: '客户编号已存在' });
@@ -178,19 +180,20 @@ router.delete('/downstream-customers/:id', authMiddleware, async (req, res) => {
  *
  * 复刻手工台账《N月XXX进出库明细.xlsx》的版式：
  *
- *   A-F  商品基础信息（序号/仓储产品编号/客户编号/客户产品代码/产品名称/规格）
- *   G    期初结存（上月末余额，不参与结存公式链——与手工表一致）
- *   H起  按当月发生业务的日期横向展开，每块 = [入库][不良品][出库单位1..N][结存]
+ *   A-G  商品基础信息（序号/仓储产品编号/客户编号/产品分类/客户产品代码/产品名称/规格）
+ *   H    期初结存（上月末余额，不参与结存公式链——与手工表一致）
+ *   I起  按当月发生业务的日期横向展开，每块 = [入库][出库单位1..N][结存]
  *
- * 数值口径（与手工表一致）：
- *   入库   = stock_in_qty（毛入库，未扣不良品）
- *   不良品 = -defective_qty（记负数，与入库同块相加得净入库）
- *   出库   = -request_qty（记负数）
+ * 数值口径：
+ *   入库 = stock_in_qty - defective_qty（净入库，不良品不再单列）
+ *   出库 = -request_qty（记负数）
  *
  * 结存列公式：SUM(上一个结存列 : 本块结存列的前一列)
- *   —— 首块从本块入库列起算，不含 G 列期初结存
- *   —— 手工表中 5 个空的不良品列被排除在 SUM 范围外（O/X/AE/BS/CH，均无数据），
- *      此处统一纳入范围，逐格计算结果与手工表完全相同
+ *   —— 首块从本块入库列起算，不含 H 列期初结存
+ *
+ * 末行合计：数据区下方一行，H 列起每列纵向 SUM(首个产品行 : 末个产品行)
+ *
+ * 产品分类列：商品按「分类 → id」排序，同分类的行在 D 列合并成一格
  */
 router.get('/export', authMiddleware, async (req, res) => {
   try {
@@ -207,9 +210,15 @@ router.get('/export', authMiddleware, async (req, res) => {
     if (customers.length === 0) return res.status(404).json({ error: '客户不存在' });
     const customerName = customers[0].customer_name || customers[0].customer_code;
 
-    // ===== 行：该客户全部商品，按 id 排序（与手工表顺序一致）=====
+    // ===== 行：该客户全部商品 =====
+    // 按「分类 → id」排序，同分类的行才连续，D 列的合并单元格才成立。
+    // 分类内部仍是 id 序，与手工表一致；默认分类排在最前，与类别管理页的顺序一致。
     const [products] = await pool.query(
-      'SELECT * FROM zhcc_product WHERE customer_code = ? ORDER BY id',
+      `SELECT p.*, cat.category_name, cat.is_default AS category_is_default
+       FROM zhcc_product p
+       LEFT JOIN zhcc_product_category cat ON cat.id = p.category_id
+       WHERE p.customer_code = ?
+       ORDER BY cat.is_default DESC, cat.category_name, p.id`,
       [customer_code]
     );
     if (products.length === 0) return res.status(404).json({ error: '该客户下没有商品' });
@@ -228,7 +237,7 @@ router.get('/export', authMiddleware, async (req, res) => {
     }
     const openingOf = id => openingOfProduct.get(id) ?? null;
 
-    // ===== 入库 / 不良品：按 商品+日期 汇总（入库取毛数，不良品单列）=====
+    // ===== 入库：按 商品+日期 汇总（净入库 = 毛入库 - 不良品）=====
     const [stockIns] = await pool.query(
       `SELECT product_id, stock_in_date, SUM(stock_in_qty) AS in_qty, SUM(defective_qty) AS bad_qty
        FROM zhcc_stock_in
@@ -268,20 +277,22 @@ router.get('/export', authMiddleware, async (req, res) => {
     ])].sort();
     if (dates.length === 0) return res.status(404).json({ error: `${y}年${m}月没有进出库数据` });
 
-    const BASE_COLS = 6;                 // A-F
-    const OPENING_COL = BASE_COLS;       // G 期初结存（独立一列，不入公式链）
-    let cursor = BASE_COLS + 1;          // H 起为第一个日期块
+    // 基础信息列（0 基下标，+1 才是 exceljs 的列号）
+    const COL_SEQ = 0, COL_WAREHOUSE = 1, COL_CUSTOMER = 2, COL_CATEGORY = 3,
+          COL_PRODUCT_CODE = 4, COL_NAME = 5, COL_SPEC = 6;
+    const BASE_COLS = 7;                 // A-G
+    const OPENING_COL = BASE_COLS;       // H 期初结存（独立一列，不入公式链）
+    let cursor = BASE_COLS + 1;          // I 起为第一个日期块
 
     const blocks = dates.map(date => {
       // 当天有发货的收货单位 —— 有几家就开几列，按当天首次咨询先后排序
       const names = [...new Set(outs.filter(o => o.inquiry_date === date).map(o => o.downstream_name))]
         .sort((a, b) => nameSeq.get(`${date}|${a}`) - nameSeq.get(`${date}|${b}`));
       const inCol = cursor;
-      const badCol = cursor + 1;
-      const outCols = names.map((_, i) => cursor + 2 + i);
-      const balCol = cursor + 2 + names.length;
+      const outCols = names.map((_, i) => cursor + 1 + i);
+      const balCol = cursor + 1 + names.length;
       cursor = balCol + 1;
-      return { date, names, inCol, badCol, outCols, balCol };
+      return { date, names, inCol, outCols, balCol };
     });
     const totalCols = cursor;
 
@@ -293,22 +304,23 @@ router.get('/export', authMiddleware, async (req, res) => {
 
     // ===== 表头 =====
     const blank = () => new Array(totalCols).fill(null);
-    const row4 = [null, '仓储产品编号', '客户编号', '客户产品代码', '产品名称', '规格'];
+    const row4 = [null, '仓储产品编号', '客户编号', '产品分类', '客户产品代码', '产品名称', '规格'];
 
     // ===== 数据行 =====
     const dataRows = products.map((p, idx) => {
       const row = blank();
-      row[0] = idx + 1;
-      row[1] = p.warehouse_code;
-      row[2] = p.customer_code;
-      row[3] = p.customer_product_code;
-      row[4] = p.product_name;
-      row[5] = p.spec;
+      row[COL_SEQ] = idx + 1;
+      row[COL_WAREHOUSE] = p.warehouse_code;
+      row[COL_CUSTOMER] = p.customer_code;
+      row[COL_CATEGORY] = p.category_name;
+      row[COL_PRODUCT_CODE] = p.customer_product_code;
+      row[COL_NAME] = p.product_name;
+      row[COL_SPEC] = p.spec;
       row[OPENING_COL] = openingOf(p.id);
       for (const b of blocks) {
         const si = inMap.get(`${p.id}|${b.date}`);
-        row[b.inCol] = si && Number(si.in_qty) ? Number(si.in_qty) : null;
-        row[b.badCol] = si && Number(si.bad_qty) ? -Number(si.bad_qty) : null;
+        const netIn = si ? Number(si.in_qty) - Number(si.bad_qty) : 0;
+        row[b.inCol] = netIn || null;
         b.names.forEach((n, i) => {
           const qty = outMap.get(`${p.id}|${b.date}|${n}`);
           row[b.outCols[i]] = qty ? -qty : null;          // 出库记负数
@@ -321,7 +333,7 @@ router.get('/export', authMiddleware, async (req, res) => {
     // ===== 写入工作簿（样式全部照手工台账实测值还原）=====
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet(`${customerName}${m}月份明细`.slice(0, 31).replace(/[:\\/?*[\]]/g, ''), {
-      views: [{ state: 'frozen', xSplit: 6, ySplit: 5 }],   // 冻结 A-F 列 + 前 5 行
+      views: [{ state: 'frozen', xSplit: BASE_COLS, ySplit: 5 }],   // 冻结 A-G 列 + 前 5 行
       properties: { defaultRowHeight: 22.05, defaultColWidth: 9 },
     });
 
@@ -344,15 +356,16 @@ router.get('/export', authMiddleware, async (req, res) => {
 
     // --- 行1：月份 ---
     // 注意：必须用 UTC 构造，否则 exceljs 按 +08:00 落盘会让日期整体前移一天
-    put(1, 5, new Date(Date.UTC(y, m - 1, 1)), { numFmt: 'yyyy"年"m"月";@' });
+    put(1, COL_NAME + 1, new Date(Date.UTC(y, m - 1, 1)), { numFmt: 'yyyy"年"m"月";@' });
 
     // --- 行3 日期 / 行4 表头（边框口径实测自手工台账，一致率 100%）---
     const BOX = bd({ top: 'thin', left: 'thin', bottom: 'thin', right: 'thin' });
     const HDR = bd({ top: 'thin', bottom: 'thin' });                  // 块内列：上下线
     const HDR_END = bd({ top: 'thin', bottom: 'thin', right: 'thin' }); // 块末列：收口
-    for (let c = 1; c <= 7; c++) {
+    // A..G 基础信息列 + H 期初结存列
+    for (let c = 1; c <= OPENING_COL + 1; c++) {
       put(3, c, null, { alignment: CENTER_WRAP, border: BOX });
-      put(4, c, c >= 2 && c <= 6 ? row4[c - 1] : null, { alignment: CENTER_WRAP, border: BOX });
+      put(4, c, c >= 2 && c <= BASE_COLS ? row4[c - 1] : null, { alignment: CENTER_WRAP, border: BOX });
     }
     for (const b of blocks) {
       const [yy, mm, dd] = b.date.split('-').map(Number);
@@ -366,23 +379,22 @@ router.get('/export', authMiddleware, async (req, res) => {
     }
 
     // --- 行5：列名（入库列黄底，与手工台账一致）---
-    const B5_BASE = bd({ top: 'thin', left: 'thin', right: 'thin' });  // A-G：带左线
+    const B5_BASE = bd({ top: 'thin', left: 'thin', right: 'thin' });  // A-H：带左线
     const B5 = bd({ top: 'thin', right: 'thin' });                     // 块内列
-    for (let c = 1; c <= 6; c++) put(5, c, null, { border: B5_BASE });
+    for (let c = 1; c <= BASE_COLS; c++) put(5, c, null, { border: B5_BASE });
     put(5, OPENING_COL + 1, '结存', { border: B5_BASE });
     for (const b of blocks) {
       put(5, b.inCol + 1, '入库', { border: B5, fill: YELLOW });
-      put(5, b.badCol + 1, '不良品', { border: B5, alignment: CENTER_WRAP });
       b.names.forEach((n, i) => put(5, b.outCols[i] + 1, n, { border: B5, alignment: CENTER_WRAP }));
       put(5, b.balCol + 1, '结存', { border: B5 });
     }
 
     // --- 数据行 ---
     const lastRow = 5 + dataRows.length;
-    // 右边框口径（实测手工台账）：出库列一律不画；不良品列在其右邻为出库列时不画，否则画；其余都画
+    // 右边框口径（实测手工台账）：出库列一律不画；入库列在其右邻为出库列时不画，否则画；其余都画
     const outColSet = new Set(blocks.flatMap(b => b.outCols.map(c => c + 1)));
     const noRightCols = new Set(outColSet);
-    for (const b of blocks) if (b.names.length > 0) noRightCols.add(b.badCol + 1);
+    for (const b of blocks) if (b.names.length > 0) noRightCols.add(b.inCol + 1);
 
     dataRows.forEach((rowData, i) => {
       const r = 6 + i;
@@ -395,7 +407,7 @@ router.get('/export', authMiddleware, async (req, res) => {
         const b = { ...border };
         if (!noRightCols.has(c)) b.right = { style: 'thin' };
         // 产品名称含换行时才开自动换行（与手工台账一致：单行品名不换行）
-        const wrap = c === 5 && typeof rowData[4] === 'string' && rowData[4].includes('\n');
+        const wrap = c === COL_NAME + 1 && typeof rowData[COL_NAME] === 'string' && rowData[COL_NAME].includes('\n');
         put(r, c, rowData[c - 1], { border: b, alignment: wrap ? CENTER_WRAP : CENTER });
       }
       // 结存列公式：首块从 G 列期初起算，其余从上一个结存列起算
@@ -407,18 +419,50 @@ router.get('/export', authMiddleware, async (req, res) => {
       });
     });
 
-    // --- 自动筛选：与手工台账一致，挂在列名行(第5行)上 ---
+    // --- 产品分类列：同分类的连续行合并成一格 ---
+    // products 已按「分类 → id」排序，所以同分类的行必然相邻。
+    // exceljs 的合并区以主格（区首）为准，值和样式在上面的数据行循环里已经写好了。
+    for (let i = 0; i < dataRows.length;) {
+      const name = dataRows[i][COL_CATEGORY];
+      let j = i + 1;
+      while (j < dataRows.length && dataRows[j][COL_CATEGORY] === name) j++;
+      if (j - i > 1) {
+        const top = 6 + i, bottom = 6 + j - 1;
+        ws.mergeCells(top, COL_CATEGORY + 1, bottom, COL_CATEGORY + 1);
+        // 合并区整体套用主格的边框，所以底线要按区末行（而非区首行）的口径重设
+        const head = ws.getCell(top, COL_CATEGORY + 1);
+        head.border = { ...head.border, bottom: { style: bottom === lastRow ? 'medium' : 'hair' } };
+      }
+      i = j;
+    }
+
+    // --- 合计行：紧贴末个产品行，H 列（期初结存）起每列纵向求和 ---
+    const totalRow = lastRow + 1;
+    const TOTAL_BORDER = { left: { style: 'thin' }, top: { style: 'medium' }, bottom: { style: 'medium' } };
+    for (let c = 1; c <= totalCols; c++) {
+      const b = { ...TOTAL_BORDER };
+      if (!noRightCols.has(c)) b.right = { style: 'thin' };
+      const cell = put(totalRow, c, null, { border: b });
+      if (c > OPENING_COL) {
+        const col = XLSX.utils.encode_col(c - 1);
+        cell.value = { formula: `SUM(${col}6:${col}${lastRow})` };
+      }
+      cell.font = { ...FONT, bold: true };
+    }
+    ws.mergeCells(totalRow, 1, totalRow, BASE_COLS);
+    ws.getCell(totalRow, 1).value = '合计';
+
+    // --- 自动筛选：与手工台账一致，挂在列名行(第5行)上；合计行不纳入筛选区 ---
     ws.autoFilter = { from: { row: 5, column: 1 }, to: { row: lastRow, column: totalCols } };
 
     // --- 行高 / 列宽 ---
     ws.getRow(4).height = 36;
     ws.getRow(5).height = 28.95;
-    const BASE_W = [4.67, 13, 13, 18.33, 37.67, 10.78];
+    const BASE_W = [4.67, 13, 13, 12, 18.33, 37.67, 10.78];   // 序号/仓储号/客户/分类/客户产品代码/品名/规格
     BASE_W.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
     ws.getColumn(OPENING_COL + 1).width = 9;
     for (const b of blocks) {
       ws.getColumn(b.inCol + 1).width = 9;
-      ws.getColumn(b.badCol + 1).width = 9.89;
       b.names.forEach((_, i) => { ws.getColumn(b.outCols[i] + 1).width = 10.38; });
       ws.getColumn(b.balCol + 1).width = 9.67;
     }
@@ -582,19 +626,162 @@ router.post('/excel-rules/:id/set-default', authMiddleware, async (req, res) => 
   }
 });
 
+// ===== 商品类别 CRUD =====
+//
+// 类别按客户隔离：每个客户一套自己的类别，其中恰好一条 is_default = 1（「默认分类」）。
+// 默认分类不可删除，是商品失去类别归属时的兜底去处：
+//   - 新建商品未指定类别
+//   - 商品改挂到别的客户，原类别不属于新客户
+//   - 类别被删除，其下商品回落
+
+const DEFAULT_CATEGORY_NAME = '默认分类';
+
+/** 取该客户的默认分类 id，没有就建一条。客户是后来新增的、或迁移时漏掉的都能兜住 */
+async function ensureDefaultCategory(conn, customerCode) {
+  if (!customerCode) return null;
+  const [rows] = await conn.query(
+    'SELECT id FROM zhcc_product_category WHERE customer_code = ? AND is_default = 1 LIMIT 1',
+    [customerCode]
+  );
+  if (rows.length > 0) return rows[0].id;
+  const [result] = await conn.query(
+    `INSERT INTO zhcc_product_category (customer_code, category_name, is_default, create_time, update_time)
+     VALUES (?, ?, 1, NOW(3), NOW(3))
+     ON DUPLICATE KEY UPDATE is_default = 1, id = LAST_INSERT_ID(id)`,
+    [customerCode, DEFAULT_CATEGORY_NAME]
+  );
+  return result.insertId;
+}
+
+/**
+ * 把前端传来的 category_id 归一成「确实属于 customerCode 的类别 id」。
+ * 空值、不存在、或属于别的客户，一律落到该客户的默认分类。
+ */
+async function resolveCategoryId(conn, customerCode, categoryId) {
+  if (!customerCode) return null;
+  const id = Number(categoryId);
+  if (id > 0) {
+    const [rows] = await conn.query(
+      'SELECT id FROM zhcc_product_category WHERE id = ? AND customer_code = ?',
+      [id, customerCode]
+    );
+    if (rows.length > 0) return rows[0].id;
+  }
+  return ensureDefaultCategory(conn, customerCode);
+}
+
+/** GET /categories?customer_code= —— 不传则返回全部客户的类别 */
+router.get('/categories', authMiddleware, async (req, res) => {
+  try {
+    const { customer_code } = req.query;
+    if (customer_code) await ensureDefaultCategory(pool, customer_code);
+    const params = [];
+    let sql = `SELECT cat.*, c.customer_name,
+                      (SELECT COUNT(*) FROM zhcc_product p WHERE p.category_id = cat.id) AS product_count
+               FROM zhcc_product_category cat
+               LEFT JOIN zhcc_customer c ON c.customer_code = cat.customer_code`;
+    if (customer_code) {
+      sql += ' WHERE cat.customer_code = ?';
+      params.push(customer_code);
+    }
+    // 默认分类固定排在本客户第一位，其余按名称
+    sql += ' ORDER BY cat.customer_code, cat.is_default DESC, cat.category_name';
+    const [rows] = await pool.query(sql, params);
+    res.json({ data: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/categories', authMiddleware, async (req, res) => {
+  try {
+    const { customer_code, category_name } = req.body;
+    if (!customer_code) return res.status(400).json({ error: '请选择所属客户' });
+    const name = (category_name || '').trim();
+    if (!name) return res.status(400).json({ error: '类别名称不能为空' });
+
+    await ensureDefaultCategory(pool, customer_code);
+    const [result] = await pool.query(
+      `INSERT INTO zhcc_product_category (customer_code, category_name, is_default, create_time, update_time)
+       VALUES (?, ?, 0, NOW(3), NOW(3))`,
+      [customer_code, name]
+    );
+    res.json({ data: { id: result.insertId, customer_code, category_name: name, is_default: 0 } });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: '该客户下已有同名类别' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** PUT /categories/:id —— 只改名字。默认分类也允许改名，is_default 标记不变 */
+router.put('/categories/:id', authMiddleware, async (req, res) => {
+  try {
+    const name = (req.body.category_name || '').trim();
+    if (!name) return res.status(400).json({ error: '类别名称不能为空' });
+    const [result] = await pool.query(
+      'UPDATE zhcc_product_category SET category_name = ?, update_time = NOW(3) WHERE id = ?',
+      [name, req.params.id]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ error: '类别不存在' });
+    res.json({ data: { success: true } });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: '该客户下已有同名类别' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** DELETE /categories/:id —— 默认分类不可删；其余删除后，下属商品回落到默认分类 */
+router.delete('/categories/:id', authMiddleware, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query('SELECT * FROM zhcc_product_category WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: '类别不存在' });
+    }
+    const category = rows[0];
+    if (category.is_default) {
+      await conn.rollback();
+      return res.status(400).json({ error: '默认分类不可删除' });
+    }
+
+    const fallbackId = await ensureDefaultCategory(conn, category.customer_code);
+    const [moved] = await conn.query(
+      'UPDATE zhcc_product SET category_id = ?, update_time = NOW(3) WHERE category_id = ?',
+      [fallbackId, category.id]
+    );
+    await conn.query('DELETE FROM zhcc_product_category WHERE id = ?', [category.id]);
+    await conn.commit();
+    res.json({ data: { success: true, moved_to_default: moved.affectedRows } });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
+  }
+});
+
 // ===== 商品管理 CRUD =====
 
 router.get('/products', authMiddleware, async (req, res) => {
   try {
-    const { customer_code } = req.query;
-    let sql = `SELECT p.*, c.customer_name 
-               FROM zhcc_product p 
-               LEFT JOIN zhcc_customer c ON p.customer_code = c.customer_code`;
+    const { customer_code, category_id } = req.query;
+    let sql = `SELECT p.*, c.customer_name, cat.category_name
+               FROM zhcc_product p
+               LEFT JOIN zhcc_customer c ON p.customer_code = c.customer_code
+               LEFT JOIN zhcc_product_category cat ON cat.id = p.category_id`;
+    const conditions = [];
     const params = [];
     if (customer_code) {
-      sql += ' WHERE p.customer_code = ?';
+      conditions.push('p.customer_code = ?');
       params.push(customer_code);
     }
+    if (category_id) {
+      conditions.push('p.category_id = ?');
+      params.push(category_id);
+    }
+    if (conditions.length > 0) sql += ' WHERE ' + conditions.join(' AND ');
     sql += ' ORDER BY p.warehouse_code';
     const [rows] = await pool.query(sql, params);
     res.json({ data: rows });
@@ -603,37 +790,71 @@ router.get('/products', authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * POST /products
+ *
+ * 建档时手填的初始库存视为「期初结存」，同步写一条 zhcc_product_backup。
+ * 进出库明细的 G 列（期初结存）只认这张备份表，不补这条记录的话，
+ * 新商品导出时 G 列为空、整行结存链全为 0，手填的库存在报表上不体现。
+ */
 router.post('/products', authMiddleware, async (req, res) => {
+  const conn = await pool.getConnection();
   try {
-    const { warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty } = req.body;
+    const { warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty, category_id } = req.body;
     if (!warehouse_code) return res.status(400).json({ error: '缺少仓储商品号' });
-    const [result] = await pool.query(
-      `INSERT INTO zhcc_product 
-        (warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty, create_time, update_time) 
-       VALUES (?, ?, ?, ?, ?, ?, NOW(3), NOW(3))`,
-      [warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', stock_qty || 0]
+    const openingQty = Number(stock_qty) || 0;
+
+    await conn.beginTransaction();
+    const categoryId = await resolveCategoryId(conn, customer_code, category_id);
+    const [result] = await conn.query(
+      `INSERT INTO zhcc_product
+        (warehouse_code, customer_code, customer_product_code, product_name, spec, category_id, stock_qty, create_time, update_time)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))`,
+      [warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', categoryId, openingQty]
     );
-    res.json({ data: { id: result.insertId, warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty } });
+    if (openingQty > 0) {
+      await conn.query(
+        `INSERT INTO zhcc_product_backup
+          (backup_date, product_id, warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty, frozen_qty, remark, create_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '建档期初', NOW(3))`,
+        [localDateTime(), result.insertId, warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', openingQty]
+      );
+    }
+    await conn.commit();
+    res.json({ data: { id: result.insertId, warehouse_code, customer_code, customer_product_code, product_name, spec, category_id: categoryId, stock_qty: openingQty } });
   } catch (err) {
+    await conn.rollback();
     if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: '仓储商品号已存在' });
     res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
   }
 });
 
+/**
+ * PUT /products/:id
+ *
+ * 类别按客户隔离，所以改挂客户时原 category_id 可能已不属于新客户，
+ * resolveCategoryId 会把这类情况落回新客户的默认分类。
+ */
 router.put('/products/:id', authMiddleware, async (req, res) => {
+  const conn = await pool.getConnection();
   try {
-    const { warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty } = req.body;
-    await pool.query(
-      `UPDATE zhcc_product SET 
-        warehouse_code = ?, customer_code = ?, customer_product_code = ?, 
-        product_name = ?, spec = ?, stock_qty = ?, update_time = NOW(3) 
+    const { warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty, category_id } = req.body;
+    const categoryId = await resolveCategoryId(conn, customer_code, category_id);
+    await conn.query(
+      `UPDATE zhcc_product SET
+        warehouse_code = ?, customer_code = ?, customer_product_code = ?,
+        product_name = ?, spec = ?, category_id = ?, stock_qty = ?, update_time = NOW(3)
        WHERE id = ?`,
-      [warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', stock_qty || 0, req.params.id]
+      [warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', categoryId, stock_qty || 0, req.params.id]
     );
-    res.json({ data: { success: true } });
+    res.json({ data: { success: true, category_id: categoryId } });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: '仓储商品号已存在' });
     res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
   }
 });
 

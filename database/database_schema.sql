@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS zhcc_product (
   customer_product_code  VARCHAR(50)  DEFAULT NULL COMMENT '客户商品编号',
   product_name           VARCHAR(255) DEFAULT NULL COMMENT '商品名称',
   spec                   VARCHAR(100) DEFAULT NULL COMMENT '规格',
+  category_id            INT          DEFAULT NULL COMMENT '商品类别ID，指向 zhcc_product_category',
   stock_qty              INT          DEFAULT 0    COMMENT '当前库存数量（结存数量）',
   -- 审计字段
   create_user_id         CHAR(36)     DEFAULT NULL COMMENT '创建者ID',
@@ -65,8 +66,27 @@ CREATE TABLE IF NOT EXISTS zhcc_product (
   update_user_id         CHAR(36)     DEFAULT NULL COMMENT '修改者ID',
   update_fullname        VARCHAR(255) DEFAULT NULL COMMENT '修改者姓名',
   update_time            DATETIME(3)  DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '修改时间',
-  UNIQUE KEY uk_warehouse_code (warehouse_code)
+  UNIQUE KEY uk_warehouse_code (warehouse_code),
+  KEY idx_category_id (category_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='仓储商品表';
+
+
+-- ============================================================
+-- 3.1 zhcc_product_category - 商品类别表
+--     类别按客户隔离；每个客户恰好一条 is_default = 1 的「默认分类」，不可删除，
+--     是商品失去类别归属（新建未选 / 改挂客户 / 原类别被删）时的兜底去处。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS zhcc_product_category (
+  id              INT AUTO_INCREMENT PRIMARY KEY,
+  customer_code   VARCHAR(50)  NOT NULL      COMMENT '所属客户编号（类别按客户隔离）',
+  category_name   VARCHAR(100) NOT NULL      COMMENT '类别名称',
+  is_default      TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '是否默认分类：每客户恰好一条，不可删除',
+  -- 审计字段
+  create_time     DATETIME(3)  DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  update_time     DATETIME(3)  DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '修改时间',
+  UNIQUE KEY uk_customer_category (customer_code, category_name),
+  KEY idx_customer_code (customer_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品类别表';
 
 
 -- ============================================================

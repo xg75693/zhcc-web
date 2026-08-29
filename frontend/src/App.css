@@ -1900,3 +1900,194 @@ body {
   border-color: #f87171;
 }
 
+
+/* ===== 类别管理弹窗 ===== */
+.category-modal {
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+}
+.category-modal h3 {
+  color: #1a73e8;
+}
+.category-customer-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 14px 0 10px;
+}
+.category-customer-picker label {
+  font-size: 14px;
+  color: #444;
+  white-space: nowrap;
+}
+.category-customer-picker select {
+  padding: 6px 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 14px;
+  min-width: 200px;
+}
+.category-hint {
+  font-size: 12px;
+  color: #888;
+}
+.category-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #b91c1c;
+  margin-bottom: 10px;
+}
+.category-list {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.category-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f3f4f6;
+}
+.category-row:last-child { border-bottom: none; }
+.category-row .cell-input { flex: 1; }
+.category-name {
+  flex: 1;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.category-badge {
+  background: #e8f0fe;
+  color: #1557b0;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+.category-count {
+  font-size: 12px;
+  color: #888;
+  white-space: nowrap;
+}
+.category-empty {
+  padding: 24px;
+  text-align: center;
+  color: #999;
+  font-size: 14px;
+}
+.category-add {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+.category-add .cell-input { flex: 1; }
+
+/* ===== 类别筛选下拉（列表第一项内嵌「管理」按钮） ===== */
+.category-select {
+  position: relative;
+  display: inline-block;
+}
+
+/* 外观对齐 .admin-form-inline select，混在工具栏里看不出是自定义控件 */
+.category-select-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 132px;
+  padding: 8px 10px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+}
+.category-select-trigger:focus {
+  outline: none;
+  border-color: #4a90d9;
+  box-shadow: 0 0 0 2px rgba(74,144,217,0.1);
+}
+.category-select-trigger:disabled {
+  background: #f5f5f5;
+  color: #999;
+  cursor: not-allowed;
+}
+.category-select-value {
+  flex: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+.category-select-caret {
+  font-size: 11px;
+  color: #888;
+  transition: transform 0.15s;
+}
+.category-select-caret.open { transform: rotate(180deg); }
+
+.category-select-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  width: max-content;
+  max-width: 320px;
+  max-height: 280px;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+}
+
+.category-select-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: #374151;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.category-select-option-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.category-select-option.active { background: #eff6ff; }
+.category-select-option.selected {
+  color: #1a73e8;
+  font-weight: 600;
+}
+/* 第一项带管理按钮，与下方的类别选项用一条分隔线拉开层次 */
+.category-select-option.with-action {
+  border-bottom: 1px solid #f0f0f0;
+  padding-right: 6px;
+}
+
+.category-select-manage {
+  flex: none;
+  padding: 2px 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  background: #fff;
+  font-size: 12px;
+  color: #555;
+  cursor: pointer;
+}
+.category-select-manage:hover {
+  border-color: #1a73e8;
+  color: #1a73e8;
+  background: #f5f9ff;
+}

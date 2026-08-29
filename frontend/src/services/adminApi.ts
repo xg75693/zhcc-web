@@ -146,6 +146,34 @@ export async function setDefaultExcelRule(id: number) {
   return request(`${BASE}/excel-rules/${id}/set-default`, { method: 'POST' });
 }
 
+// ===== 商品类别 =====
+// 类别按客户隔离：每个客户一套，其中 is_default 的那条不可删除，是商品的兜底归属。
+export interface AdminProductCategory {
+  id: number;
+  customer_code: string;
+  category_name: string;
+  is_default: number;
+  customer_name: string | null;
+  product_count: number;
+}
+
+export async function fetchAdminCategories(customerCode?: string): Promise<AdminProductCategory[]> {
+  const qs = customerCode ? `?customer_code=${encodeURIComponent(customerCode)}` : '';
+  return request(`${BASE}/categories${qs}`);
+}
+
+export async function createAdminCategory(data: { customer_code: string; category_name: string }) {
+  return request(`${BASE}/categories`, { method: 'POST', body: JSON.stringify(data) });
+}
+
+export async function updateAdminCategory(id: number, data: { category_name: string }) {
+  return request(`${BASE}/categories/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+}
+
+export async function deleteAdminCategory(id: number): Promise<{ success: boolean; moved_to_default: number }> {
+  return request(`${BASE}/categories/${id}`, { method: 'DELETE' });
+}
+
 // ===== 商品管理 =====
 export interface AdminProduct {
   id: number;
@@ -154,6 +182,8 @@ export interface AdminProduct {
   customer_product_code: string;
   product_name: string;
   spec: string | null;
+  category_id: number | null;
+  category_name: string | null;
   stock_qty: number;
   customer_name: string | null;
 }
@@ -169,6 +199,7 @@ export async function createAdminProduct(data: {
   customer_product_code?: string;
   product_name?: string;
   spec?: string;
+  category_id?: number | null;
   stock_qty?: number;
 }) {
   return request(`${BASE}/products`, { method: 'POST', body: JSON.stringify(data) });
@@ -180,6 +211,7 @@ export async function updateAdminProduct(id: number, data: {
   customer_product_code?: string;
   product_name?: string;
   spec?: string;
+  category_id?: number | null;
   stock_qty?: number;
 }) {
   return request(`${BASE}/products/${id}`, { method: 'PUT', body: JSON.stringify(data) });
