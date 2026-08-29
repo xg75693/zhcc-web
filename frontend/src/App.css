@@ -2091,3 +2091,19 @@ body {
   color: #1a73e8;
   background: #f5f9ff;
 }
+
+/* 类别管理弹窗里的排序输入框：常驻可编辑，失焦提交 */
+.category-sort-input {
+  flex: none;
+  width: 56px;
+  text-align: center;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+/* 去掉数字框的上下箭头，宽度太窄容易误点 */
+.category-sort-input::-webkit-outer-spin-button,
+.category-sort-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.category-sort-input { -moz-appearance: textfield; appearance: textfield; }

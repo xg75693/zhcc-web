@@ -22,12 +22,23 @@ CREATE TABLE IF NOT EXISTS zhcc_product_category (
   customer_code   VARCHAR(50)  NOT NULL      COMMENT '所属客户编号（类别按客户隔离）',
   category_name   VARCHAR(100) NOT NULL      COMMENT '类别名称',
   is_default      TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '是否默认分类：每客户恰好一条，不可删除',
+  sort_order      INT          NOT NULL DEFAULT 0 COMMENT '分类排序，值小的在前；相同则默认分类优先、再按名称',
   -- 审计字段
   create_time     DATETIME(3)  DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
   update_time     DATETIME(3)  DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '修改时间',
   UNIQUE KEY uk_customer_category (customer_code, category_name),
   KEY idx_customer_code (customer_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品类别表';
+
+-- 1.1 已建过表的库补 sort_order 列（ADD COLUMN 非幂等）
+SET @has_sort = (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'zhcc_product_category' AND COLUMN_NAME = 'sort_order'
+);
+SET @sql = IF(@has_sort = 0,
+  'ALTER TABLE zhcc_product_category ADD COLUMN sort_order INT NOT NULL DEFAULT 0 COMMENT ''分类排序，值小的在前；相同则默认分类优先、再按名称'' AFTER is_default',
+  'DO 0');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- ============================================================
 -- 2. 商品表增加类别列（ADD COLUMN 非幂等，先查 information_schema）

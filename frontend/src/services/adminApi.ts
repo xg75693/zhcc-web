@@ -153,6 +153,8 @@ export interface AdminProductCategory {
   customer_code: string;
   category_name: string;
   is_default: number;
+  /** 分类排序，值小的在前；相同则默认分类优先、再按名称 */
+  sort_order: number;
   customer_name: string | null;
   product_count: number;
 }
@@ -162,11 +164,12 @@ export async function fetchAdminCategories(customerCode?: string): Promise<Admin
   return request(`${BASE}/categories${qs}`);
 }
 
-export async function createAdminCategory(data: { customer_code: string; category_name: string }) {
+export async function createAdminCategory(data: { customer_code: string; category_name: string; sort_order?: number }) {
   return request(`${BASE}/categories`, { method: 'POST', body: JSON.stringify(data) });
 }
 
-export async function updateAdminCategory(id: number, data: { category_name: string }) {
+/** 传什么改什么：只改名、只改排序、或两者一起 */
+export async function updateAdminCategory(id: number, data: { category_name?: string; sort_order?: number }) {
   return request(`${BASE}/categories/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 

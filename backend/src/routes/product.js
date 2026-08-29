@@ -16,17 +16,21 @@ router.get('/customers', async (req, res) => {
 });
 
 // 获取商品列表（支持按客户筛选）
+// 连类别表只为排序：先按用户维护的分类顺序，类别内保持原有的仓储商品号序
 router.get('/products', async (req, res) => {
   try {
     const { customer_code } = req.query;
-    let sql = 'SELECT id, warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty FROM zhcc_product';
+    let sql = `SELECT p.id, p.warehouse_code, p.customer_code, p.customer_product_code,
+                      p.product_name, p.spec, p.stock_qty, cat.category_name
+               FROM zhcc_product p
+               LEFT JOIN zhcc_product_category cat ON cat.id = p.category_id`;
     const params = [];
 
     if (customer_code) {
-      sql += ' WHERE customer_code = ?';
+      sql += ' WHERE p.customer_code = ?';
       params.push(customer_code);
     }
-    sql += ' ORDER BY warehouse_code';
+    sql += ' ORDER BY cat.sort_order ASC, cat.is_default DESC, cat.category_name, p.warehouse_code';
 
     const [rows] = await pool.query(sql, params);
     res.json({ data: rows });

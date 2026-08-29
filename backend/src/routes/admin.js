@@ -212,13 +212,13 @@ router.get('/export', authMiddleware, async (req, res) => {
 
     // ===== 行：该客户全部商品 =====
     // 按「分类 → id」排序，同分类的行才连续，D 列的合并单元格才成立。
-    // 分类内部仍是 id 序，与手工表一致；默认分类排在最前，与类别管理页的顺序一致。
+    // 分类内部仍是 id 序，与手工表一致；类别之间按用户维护的 sort_order。
     const [products] = await pool.query(
       `SELECT p.*, cat.category_name, cat.is_default AS category_is_default
        FROM zhcc_product p
        LEFT JOIN zhcc_product_category cat ON cat.id = p.category_id
        WHERE p.customer_code = ?
-       ORDER BY cat.is_default DESC, cat.category_name, p.id`,
+       ORDER BY ${CATEGORY_ORDER}, p.id`,
       [customer_code]
     );
     if (products.length === 0) return res.status(404).json({ error: '该客户下没有商品' });
@@ -636,6 +636,13 @@ router.post('/excel-rules/:id/set-default', authMiddleware, async (req, res) => 
 
 const DEFAULT_CATEGORY_NAME = '默认分类';
 
+/**
+ * 类别的排序口径，供所有「按类别排序」的查询复用（表别名固定为 cat）。
+ * sort_order 由用户维护、值小的在前；相同时默认分类优先，再按名称。
+ * 商品列表在此之后再接各自原有的排序条件（仓储商品号 / id 等）。
+ */
+const CATEGORY_ORDER = 'cat.sort_order ASC, cat.is_default DESC, cat.category_name';
+
 /** 取该客户的默认分类 id，没有就建一条。客户是后来新增的、或迁移时漏掉的都能兜住 */
 async function ensureDefaultCategory(conn, customerCode) {
   if (!customerCode) return null;
@@ -684,8 +691,7 @@ router.get('/categories', authMiddleware, async (req, res) => {
       sql += ' WHERE cat.customer_code = ?';
       params.push(customer_code);
     }
-    // 默认分类固定排在本客户第一位，其余按名称
-    sql += ' ORDER BY cat.customer_code, cat.is_default DESC, cat.category_name';
+    sql += ` ORDER BY cat.customer_code, ${CATEGORY_ORDER}`;
     const [rows] = await pool.query(sql, params);
     res.json({ data: rows });
   } catch (err) {
@@ -695,32 +701,53 @@ router.get('/categories', authMiddleware, async (req, res) => {
 
 router.post('/categories', authMiddleware, async (req, res) => {
   try {
-    const { customer_code, category_name } = req.body;
+    const { customer_code, category_name, sort_order } = req.body;
     if (!customer_code) return res.status(400).json({ error: '请选择所属客户' });
     const name = (category_name || '').trim();
     if (!name) return res.status(400).json({ error: '类别名称不能为空' });
+    const sortOrder = Number.isFinite(Number(sort_order)) ? Number(sort_order) : 0;
 
     await ensureDefaultCategory(pool, customer_code);
     const [result] = await pool.query(
-      `INSERT INTO zhcc_product_category (customer_code, category_name, is_default, create_time, update_time)
-       VALUES (?, ?, 0, NOW(3), NOW(3))`,
-      [customer_code, name]
+      `INSERT INTO zhcc_product_category (customer_code, category_name, is_default, sort_order, create_time, update_time)
+       VALUES (?, ?, 0, ?, NOW(3), NOW(3))`,
+      [customer_code, name, sortOrder]
     );
-    res.json({ data: { id: result.insertId, customer_code, category_name: name, is_default: 0 } });
+    res.json({ data: { id: result.insertId, customer_code, category_name: name, is_default: 0, sort_order: sortOrder } });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: '该客户下已有同名类别' });
     res.status(500).json({ error: err.message });
   }
 });
 
-/** PUT /categories/:id —— 只改名字。默认分类也允许改名，is_default 标记不变 */
+/**
+ * PUT /categories/:id —— 改名字和/或排序，传什么改什么。
+ * 默认分类也允许改名和排序，is_default 标记不变。
+ */
 router.put('/categories/:id', authMiddleware, async (req, res) => {
   try {
-    const name = (req.body.category_name || '').trim();
-    if (!name) return res.status(400).json({ error: '类别名称不能为空' });
+    const { category_name, sort_order } = req.body;
+    const sets = [];
+    const params = [];
+
+    if (category_name !== undefined) {
+      const name = String(category_name).trim();
+      if (!name) return res.status(400).json({ error: '类别名称不能为空' });
+      sets.push('category_name = ?');
+      params.push(name);
+    }
+    if (sort_order !== undefined) {
+      const n = Number(sort_order);
+      if (!Number.isFinite(n)) return res.status(400).json({ error: '排序值必须是数字' });
+      sets.push('sort_order = ?');
+      params.push(Math.trunc(n));
+    }
+    if (sets.length === 0) return res.status(400).json({ error: '没有要修改的内容' });
+
+    params.push(req.params.id);
     const [result] = await pool.query(
-      'UPDATE zhcc_product_category SET category_name = ?, update_time = NOW(3) WHERE id = ?',
-      [name, req.params.id]
+      `UPDATE zhcc_product_category SET ${sets.join(', ')}, update_time = NOW(3) WHERE id = ?`,
+      params
     );
     if (result.affectedRows === 0) return res.status(404).json({ error: '类别不存在' });
     res.json({ data: { success: true } });
@@ -782,7 +809,8 @@ router.get('/products', authMiddleware, async (req, res) => {
       params.push(category_id);
     }
     if (conditions.length > 0) sql += ' WHERE ' + conditions.join(' AND ');
-    sql += ' ORDER BY p.warehouse_code';
+    // 先按类别排序（用户维护的 sort_order），类别内保持原有的仓储商品号序
+    sql += ` ORDER BY ${CATEGORY_ORDER}, p.warehouse_code`;
     const [rows] = await pool.query(sql, params);
     res.json({ data: rows });
   } catch (err) {

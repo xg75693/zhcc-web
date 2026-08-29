@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS zhcc_product_category (
   customer_code   VARCHAR(50)  NOT NULL      COMMENT '所属客户编号（类别按客户隔离）',
   category_name   VARCHAR(100) NOT NULL      COMMENT '类别名称',
   is_default      TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '是否默认分类：每客户恰好一条，不可删除',
+  sort_order      INT          NOT NULL DEFAULT 0 COMMENT '分类排序，值小的在前；相同则默认分类优先、再按名称',
   -- 审计字段
   create_time     DATETIME(3)  DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
   update_time     DATETIME(3)  DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '修改时间',

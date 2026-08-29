@@ -388,8 +388,9 @@ function ProductTab() {
    * 选项即所选客户名下的类别（categories 已随 filterCustomer 拉取）。
    */
   const categoryFilterEnabled = !!filterCustomer;
+  // 保持后端返回的顺序（sort_order → 默认分类 → 名称），不要在前端重新排
   const categoryNameOptions = useMemo(
-    () => [...new Set(categories.map(c => c.category_name))].sort((a, b) => a.localeCompare(b, 'zh')),
+    () => [...new Set(categories.map(c => c.category_name))],
     [categories]
   );
 

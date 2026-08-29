@@ -33,11 +33,16 @@ export default function CategoryManageModal({ customers, initialCustomerCode, on
   const [editName, setEditName] = useState('');
   const [savingId, setSavingId] = useState<number | null>(null);
 
+  // 排序框是常驻可编辑的，本地先存草稿，失焦/回车才提交，避免每敲一个数字发一次请求
+  const [sortDraft, setSortDraft] = useState<Record<number, string>>({});
+
   const load = useCallback(async () => {
     if (!customerCode) { setCategories([]); return; }
     setLoading(true); setError('');
     try {
-      setCategories(await fetchAdminCategories(customerCode));
+      const list = await fetchAdminCategories(customerCode);
+      setCategories(list);
+      setSortDraft(Object.fromEntries(list.map(c => [c.id, String(c.sort_order ?? 0)])));
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载类别失败');
     } finally {
@@ -83,6 +88,32 @@ export default function CategoryManageModal({ customers, initialCustomerCode, on
     }
   };
 
+  /** 排序改完提交。值没变或非法就还原成当前值，不发请求 */
+  const commitSort = async (c: AdminProductCategory) => {
+    const raw = (sortDraft[c.id] ?? '').trim();
+    const n = Number(raw);
+    if (raw === '' || !Number.isFinite(n)) {
+      setSortDraft(d => ({ ...d, [c.id]: String(c.sort_order ?? 0) }));
+      return;
+    }
+    const next = Math.trunc(n);
+    if (next === c.sort_order) {
+      setSortDraft(d => ({ ...d, [c.id]: String(next) }));
+      return;
+    }
+    setSavingId(c.id); setError('');
+    try {
+      await updateAdminCategory(c.id, { sort_order: next });
+      setChanged(true);
+      await load();   // 重拉以按新顺序重排列表
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存排序失败');
+      setSortDraft(d => ({ ...d, [c.id]: String(c.sort_order ?? 0) }));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
   const handleDelete = async (c: AdminProductCategory) => {
     const tip = c.product_count > 0
       ? `「${c.category_name}」下有 ${c.product_count} 个商品，删除后这些商品会转到「默认分类」。确认删除？`
@@ -115,7 +146,7 @@ export default function CategoryManageModal({ customers, initialCustomerCode, on
               </option>
             ))}
           </select>
-          <span className="category-hint">类别按客户隔离，各客户互不影响</span>
+          <span className="category-hint">类别按客户隔离；左侧数字为排序，值小的在前</span>
         </div>
 
         {error && <div className="category-error">{error}</div>}
@@ -128,6 +159,25 @@ export default function CategoryManageModal({ customers, initialCustomerCode, on
           <div className="category-list">
             {categories.map(c => (
               <div key={c.id} className="category-row">
+                {/* 排序框常驻，与名称的编辑态互不影响 */}
+                <input
+                  className="cell-input category-sort-input"
+                  type="number"
+                  step={1}
+                  title="排序，值小的在前"
+                  value={sortDraft[c.id] ?? ''}
+                  disabled={savingId === c.id}
+                  onFocus={e => e.target.select()}
+                  onChange={e => setSortDraft(d => ({ ...d, [c.id]: e.target.value }))}
+                  onBlur={() => commitSort(c)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+                    else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setSortDraft(d => ({ ...d, [c.id]: String(c.sort_order ?? 0) }));
+                    }
+                  }}
+                />
                 {editingId === c.id ? (
                   <>
                     <input
