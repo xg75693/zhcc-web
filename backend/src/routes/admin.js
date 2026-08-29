@@ -796,6 +796,9 @@ router.get('/products', authMiddleware, async (req, res) => {
  * 建档时手填的初始库存视为「期初结存」，同步写一条 zhcc_product_backup。
  * 进出库明细的期初结存列只认这张备份表，不补这条记录的话，
  * 新商品导出时该列为空、整行结存链全为 0，手填的库存在报表上不体现。
+ *
+ * 结存填 0 也要写：0 是有效的期初值（就是没货），不是「没有期初数据」。
+ * 少了这条记录，导出时期初列是空白，而同行后面的结存列都算得 0，对不上。
  */
 router.post('/products', authMiddleware, async (req, res) => {
   const conn = await pool.getConnection();
@@ -812,14 +815,12 @@ router.post('/products', authMiddleware, async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))`,
       [warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', categoryId, openingQty]
     );
-    if (openingQty > 0) {
-      await conn.query(
-        `INSERT INTO zhcc_product_backup
-          (backup_date, product_id, warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty, frozen_qty, remark, create_time)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '建档期初', NOW(3))`,
-        [localDateTime(), result.insertId, warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', openingQty]
-      );
-    }
+    await conn.query(
+      `INSERT INTO zhcc_product_backup
+        (backup_date, product_id, warehouse_code, customer_code, customer_product_code, product_name, spec, stock_qty, frozen_qty, remark, create_time)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '建档期初', NOW(3))`,
+      [localDateTime(), result.insertId, warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', openingQty]
+    );
     await conn.commit();
     res.json({ data: { id: result.insertId, warehouse_code, customer_code, customer_product_code, product_name, spec, category_id: categoryId, stock_qty: openingQty } });
   } catch (err) {
@@ -838,9 +839,10 @@ router.post('/products', authMiddleware, async (req, res) => {
  * 1. 类别按客户隔离，改挂客户时原 category_id 可能已不属于新客户，
  *    resolveCategoryId 会把这类情况落回新客户的默认分类。
  * 2. 商品在 zhcc_product_backup 里一条记录都没有时，补一条建档期初。
- *    期初结存列只认那张备份表，没有记录就导不出结存。这类商品有两个来源：
- *    「建档写期初」上线前建的存量商品，以及建档时填 0、事后才改结存的商品。
+ *    期初结存列只认那张备份表，没有记录就导不出结存。这类商品来自
+ *    「建档写期初」上线之前的存量数据。
  *    只补「完全没有备份记录」的情况——已有记录说明发过货，那是历史快照，不能覆盖。
+ *    结存为 0 同样要补：0 是有效的期初值，不是「没有期初数据」。
  */
 router.put('/products/:id', authMiddleware, async (req, res) => {
   const conn = await pool.getConnection();
@@ -858,25 +860,22 @@ router.put('/products/:id', authMiddleware, async (req, res) => {
       [warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', categoryId, qty, req.params.id]
     );
 
-    let backfilled = false;
-    if (qty > 0) {
-      const [had] = await conn.query(
-        'SELECT 1 FROM zhcc_product_backup WHERE product_id = ? LIMIT 1',
+    const [had] = await conn.query(
+      'SELECT 1 FROM zhcc_product_backup WHERE product_id = ? LIMIT 1',
+      [req.params.id]
+    );
+    const backfilled = had.length === 0;
+    if (backfilled) {
+      // backup_date 取建档时间而非当前时间，语义上这是「期初」而不是今天发生的变动
+      await conn.query(
+        `INSERT INTO zhcc_product_backup
+          (backup_date, product_id, warehouse_code, customer_code, customer_product_code,
+           product_name, spec, stock_qty, frozen_qty, remark, create_time)
+         SELECT p.create_time, p.id, p.warehouse_code, p.customer_code, p.customer_product_code,
+                p.product_name, p.spec, p.stock_qty, 0, '建档期初(补录)', NOW(3)
+         FROM zhcc_product p WHERE p.id = ?`,
         [req.params.id]
       );
-      if (had.length === 0) {
-        // backup_date 取建档时间而非当前时间，语义上这是「期初」而不是今天发生的变动
-        await conn.query(
-          `INSERT INTO zhcc_product_backup
-            (backup_date, product_id, warehouse_code, customer_code, customer_product_code,
-             product_name, spec, stock_qty, frozen_qty, remark, create_time)
-           SELECT p.create_time, p.id, p.warehouse_code, p.customer_code, p.customer_product_code,
-                  p.product_name, p.spec, p.stock_qty, 0, '建档期初(补录)', NOW(3)
-           FROM zhcc_product p WHERE p.id = ?`,
-          [req.params.id]
-        );
-        backfilled = true;
-      }
     }
 
     await conn.commit();

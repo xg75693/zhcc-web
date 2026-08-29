@@ -80,6 +80,9 @@ WHERE p.category_id IS NULL;
 --    手填的库存在报表上完全不体现。
 --    这里按商品当前 stock_qty 补一条建档期初（仅限从无备份记录的商品，
 --    不动已有记录，避免覆盖历史发货快照）。
+--    stock_qty = 0 的商品同样要补：0 是有效的期初值（就是没货），不是
+--    「没有期初数据」。少了这条记录，导出时期初列是空白，而同行后面的
+--    结存列都算得 0，两者对不上。
 -- ============================================================
 INSERT INTO zhcc_product_backup
   (backup_date, product_id, warehouse_code, customer_code, customer_product_code,
@@ -88,7 +91,7 @@ SELECT p.create_time, p.id, p.warehouse_code, p.customer_code, p.customer_produc
        p.product_name, p.spec, p.stock_qty, 0, '建档期初(补录)', NOW(3)
 FROM zhcc_product p
 LEFT JOIN zhcc_product_backup b ON b.product_id = p.id
-WHERE b.product_id IS NULL AND p.stock_qty > 0;
+WHERE b.product_id IS NULL;
 
 -- ============================================================
 -- 6. 校验：三项都应为 0
@@ -98,4 +101,4 @@ SELECT
   (SELECT COUNT(*) FROM zhcc_product p LEFT JOIN zhcc_product_category c
      ON c.id = p.category_id WHERE c.id IS NULL)                           AS 类别失效商品数,
   (SELECT COUNT(*) FROM zhcc_product p LEFT JOIN zhcc_product_backup b
-     ON b.product_id = p.id WHERE b.product_id IS NULL AND p.stock_qty > 0) AS 缺期初备份商品数;
+     ON b.product_id = p.id WHERE b.product_id IS NULL)                    AS 缺期初备份商品数;
