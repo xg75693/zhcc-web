@@ -198,11 +198,15 @@ router.delete('/downstream-customers/:id', authMiddleware, async (req, res) => {
 router.get('/export', authMiddleware, async (req, res) => {
   try {
     const { year, month, customer_code } = req.query;
-    if (!year || !month) return res.status(400).json({ error: '请选择年月' });
     if (!customer_code) return res.status(400).json({ error: '请选择客户' });
 
-    const y = parseInt(year);
-    const m = parseInt(month);
+    // 页面已去掉年月选择，固定导出当前月；这里仍接受显式传参，便于补导历史月份
+    const today = new Date();
+    const y = year ? parseInt(year) : today.getFullYear();
+    const m = month ? parseInt(month) : today.getMonth() + 1;
+    if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12) {
+      return res.status(400).json({ error: '年月参数不合法' });
+    }
     const startDate = `${y}-${String(m).padStart(2, '0')}-01`;
     const endDate = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
 

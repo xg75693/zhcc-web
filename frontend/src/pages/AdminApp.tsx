@@ -1277,9 +1277,6 @@ function InquiryRecordsTab() {
 
 // ===== 导出 Tab =====
 function ExportTab() {
-  const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
   const [customers, setCustomers] = useState<AdminCustomer[]>([]);
   const [customerCode, setCustomerCode] = useState('');
   const [exporting, setExporting] = useState(false);
@@ -1291,12 +1288,14 @@ function ExportTab() {
     }).catch(() => {});
   }, []);
 
+  // 固定导出当前年月。在点击那一刻现算，页面一直开着跨了月也不会导成上个月
   const handleExport = async () => {
     if (!customerCode) return alert('请先选择客户');
     const name = customers.find(c => c.customer_code === customerCode)?.customer_name || customerCode;
+    const now = new Date();
     setExporting(true);
     try {
-      await exportMonthlyReport(year, month, customerCode, name);
+      await exportMonthlyReport(now.getFullYear(), now.getMonth() + 1, customerCode, name);
     } catch (e) {
       alert(e instanceof Error ? e.message : '导出失败');
     } finally {
@@ -1304,8 +1303,8 @@ function ExportTab() {
     }
   };
 
-  const years = Array.from({ length: 5 }, (_, i) => now.getFullYear() - 2 + i);
-  const months = Array.from({ length: 12 }, (_, i) => i + 1);
+  const now = new Date();
+  const label = `${now.getFullYear()}年${now.getMonth() + 1}月`;
 
   return (
     <div className="admin-tab-panel">
@@ -1318,15 +1317,8 @@ function ExportTab() {
             </option>
           ))}
         </select>
-        <label>年月：</label>
-        <select value={year} onChange={e => setYear(Number(e.target.value))}>
-          {years.map(y => <option key={y} value={y}>{y}年</option>)}
-        </select>
-        <select value={month} onChange={e => setMonth(Number(e.target.value))}>
-          {months.map(m => <option key={m} value={m}>{m}月</option>)}
-        </select>
         <button className="btn-primary btn-export" onClick={handleExport} disabled={exporting || !customerCode}>
-          {exporting ? '导出中...' : `导出 ${year}年${month}月 进出库明细`}
+          {exporting ? '导出中...' : `导出 ${label} 进出库明细`}
         </button>
       </div>
       <div className="export-hint">
