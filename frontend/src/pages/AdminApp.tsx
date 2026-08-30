@@ -4,6 +4,7 @@ import SearchableSelect from '../components/SearchableSelect.tsx';
 import BackupSelectionModal from '../components/BackupSelectionModal.tsx';
 import CategoryManageModal from '../components/CategoryManageModal.tsx';
 import CategorySelect from '../components/CategorySelect.tsx';
+import InquiryBatchEditModal from '../components/InquiryBatchEditModal.tsx';
 
 /** 获取本地日期字符串 YYYY-MM-DD（避免 UTC 时区偏差） */
 function localDateStr(d: Date = new Date()): string {
@@ -24,7 +25,7 @@ import {
   fetchAdminCategories,
   fetchStockInRecords, createStockInRecord, updateStockInRecord, deleteStockInRecord,
   fetchBackupCandidates, executeBackup,
-  fetchAdminInquiryRecords,
+  fetchAdminInquiryRecords, deleteAdminInquiryBatch,
   type AdminCustomer, type AdminDownstreamCustomer, type AdminProduct, type StockInRecord, type BackupResult,
   type BackupCandidates, type AdminProductCategory,
   type AdminInquiryRecord,
@@ -1097,6 +1098,10 @@ function InquiryRecordsTab() {
   const pageSize = 100;
   const selectStyle = { padding: '4px 8px', borderRadius: '6px', border: '1px solid #d1d5db', fontSize: '13px', minWidth: '100px' };
 
+  // 整单编辑目标 + 正在删除的批次（防重复点击）
+  const [editingBatch, setEditingBatch] = useState<AdminBatchGroup | null>(null);
+  const [busyBatch, setBusyBatch] = useState<string | null>(null);
+
   // 当客户变更时，重置收货单位筛选
   const handleCustomerCodeChange = (code: string) => {
     setCustomerCode(code);
@@ -1162,6 +1167,30 @@ function InquiryRecordsTab() {
     return <span className="result-tag tag-fail">✗ 不可订货</span>;
   };
 
+  const handleDeleteBatch = async (batch: AdminBatchGroup) => {
+    const lines = batch.items.map(i => `  · ${i.product_name || i.warehouse_code} × ${i.request_qty}`).join('\n');
+    if (!confirm(
+      `确认删除这一整单咨询记录？\n\n` +
+      `咨询日期：${new Date(batch.inquiry_date).toLocaleDateString('zh-CN')}\n` +
+      `客户：${batch.customer_name}\n` +
+      `收货单位：${batch.downstream_customer_name || '-'}\n` +
+      `共 ${batch.items.length} 个商品：\n${lines}\n\n` +
+      `整单记录会被清除，其占用的冻结库存同时释放（相关商品的可用数量随之恢复）。\n` +
+      `此操作不可撤销。`
+    )) return;
+
+    setBusyBatch(batch.batch_id);
+    try {
+      const res = await deleteAdminInquiryBatch(batch.batch_id);
+      await load();
+      alert(`已删除 ${res.deleted} 条商品记录，释放 ${res.released_freezes} 条冻结`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '删除失败');
+    } finally {
+      setBusyBatch(null);
+    }
+  };
+
   const totalPages = Math.ceil(total / pageSize);
   const downstreamOptions = useMemo(() => downstreams.map(d => ({ value: d, label: d })), [downstreams]);
 
@@ -1205,9 +1234,19 @@ function InquiryRecordsTab() {
               <span className="batch-col-count">商品数</span>
               <span className="batch-col-result">咨询结论</span>
               <span className="batch-col-time">咨询时间</span>
+              <span className="batch-col-actions">操作</span>
             </div>
 
-            {batches.map(batch => (
+            {batches.map(batch => {
+              // 整单只要有一个商品发过货就锁定：库存已扣、已进报表和备份快照，
+              // 一半可改一半不可改会破坏数据完整性
+              const shippedNames = batch.items
+                .filter(i => Number(i.has_shipped) === 1)
+                .map(i => i.product_name || i.warehouse_code);
+              const locked = shippedNames.length > 0;
+              const lockTip = locked ? `已发货（${shippedNames.join('、')}），整单不可改删` : '';
+              const busy = busyBatch === batch.batch_id;
+              return (
               <div key={batch.batch_id} className={`batch-row ${expandedBatch === batch.batch_id ? 'expanded' : ''}`}>
                 <div className="batch-main" onClick={() => toggleExpand(batch.batch_id)}>
                   <span className="batch-col-expand">
@@ -1216,9 +1255,28 @@ function InquiryRecordsTab() {
                   <span className="batch-col-date">{new Date(batch.inquiry_date).toLocaleDateString('zh-CN')}</span>
                   <span className="batch-col-customer">{batch.customer_name}（{batch.customer_code}）</span>
                   <span className="batch-col-downstream">{batch.downstream_customer_name || '-'}</span>
-                  <span className="batch-col-count">{batch.items.length} 个商品</span>
+                  {/* 批次行只给出「有几个已发货」这一句，用于解释按钮为何置灰；
+                      具体是哪几个商品，展开明细的「发货状态」列里逐行可见 */}
+                  <span className="batch-col-count">
+                    {batch.items.length} 个商品
+                    {locked && <em className="batch-shipped-hint">{shippedNames.length} 已发货</em>}
+                  </span>
                   <span className="batch-col-result">{getBatchTag(batch.batch_result)}</span>
                   <span className="batch-col-time">{new Date(batch.create_time).toLocaleString('zh-CN')}</span>
+                  <span className="batch-col-actions" onClick={e => e.stopPropagation()}>
+                    <button
+                      className="btn-sm"
+                      disabled={locked || busy}
+                      title={lockTip}
+                      onClick={() => setEditingBatch(batch)}
+                    >编辑</button>
+                    <button
+                      className="btn-sm btn-danger"
+                      disabled={locked || busy}
+                      title={lockTip}
+                      onClick={() => handleDeleteBatch(batch)}
+                    >{busy ? '删除中' : '删除'}</button>
+                  </span>
                 </div>
 
                 {expandedBatch === batch.batch_id && (
@@ -1234,9 +1292,12 @@ function InquiryRecordsTab() {
                           <th>冻结数量</th>
                           <th>实时库存</th>
                           <th>商品结论</th>
+                          <th>发货状态</th>
                         </tr>
                       </thead>
                       <tbody>
+                        {/* 一键备份是按商品勾选的，同一单里各商品的发货状态可能不同，
+                            所以发货标记落在商品行上而非批次行 */}
                         {batch.items.map(item => (
                           <tr key={item.id} className={item.result === 'approved' ? 'row-pass' : 'row-fail'}>
                             <td><code>{item.customer_product_code}</code></td>
@@ -1253,6 +1314,15 @@ function InquiryRecordsTab() {
                                 <span className="result-tag tag-fail">✗ 不可订</span>
                               )}
                             </td>
+                            <td>
+                              {Number(item.has_shipped) === 1 ? (
+                                <span className="result-tag tag-shipped">已发货</span>
+                              ) : Number(item.active_freeze_qty) > 0 ? (
+                                <span className="result-tag tag-frozen">冻结中 {item.active_freeze_qty}</span>
+                              ) : (
+                                <span className="cell-muted">—</span>
+                              )}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1260,7 +1330,8 @@ function InquiryRecordsTab() {
                   </div>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
           {totalPages > 1 && (
             <div className="pagination" style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginTop: '12px' }}>
@@ -1268,6 +1339,13 @@ function InquiryRecordsTab() {
               <span style={{ lineHeight: '28px' }}>{page} / {totalPages}</span>
               <button disabled={page >= totalPages} onClick={() => setPage(p => p + 1)} style={{ padding: '4px 10px' }}>下一页</button>
             </div>
+          )}
+
+          {editingBatch && (
+            <InquiryBatchEditModal
+              batch={editingBatch}
+              onClose={saved => { setEditingBatch(null); if (saved) load(); }}
+            />
           )}
         </>
       )}

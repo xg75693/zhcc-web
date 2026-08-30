@@ -705,7 +705,7 @@ body {
 
 .batch-list > .batch-header {
   display: grid;
-  grid-template-columns: 32px 100px 1.2fr 1fr 80px 100px 160px;
+  grid-template-columns: 32px 100px 1.2fr 1fr 80px 120px 160px 116px;
   gap: 8px;
   padding: 10px 12px;
   background: #fafafa;
@@ -725,7 +725,7 @@ body {
 
 .batch-main {
   display: grid;
-  grid-template-columns: 32px 100px 1.2fr 1fr 80px 100px 160px;
+  grid-template-columns: 32px 100px 1.2fr 1fr 80px 120px 160px 116px;
   gap: 8px;
   padding: 12px;
   cursor: pointer;
@@ -1980,3 +1980,106 @@ body {
   margin: 0;
 }
 .category-sort-input { -moz-appearance: textfield; appearance: textfield; }
+
+/* ===== 咨询记录：整单编辑 / 删除 ===== */
+.batch-col-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.batch-col-actions .btn-sm:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-color: #e5e7eb;
+  color: #9ca3af;
+}
+.tag-shipped {
+  margin-left: 6px;
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.batch-edit-modal {
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  max-height: 86vh;
+}
+.batch-edit-modal h3 { color: #1a73e8; }
+
+.batch-edit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin: 14px 0 12px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #374151;
+}
+.batch-edit-meta span {
+  color: #888;
+  margin-right: 8px;
+}
+
+.batch-edit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  display: block;
+  overflow-y: auto;
+  max-height: 340px;
+}
+.batch-edit-table thead,
+.batch-edit-table tbody { display: table; width: 100%; table-layout: fixed; }
+.batch-edit-table thead {
+  position: sticky;
+  top: 0;
+  background: #fafafa;
+  z-index: 1;
+}
+.batch-edit-table th {
+  padding: 8px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: #666;
+  border-bottom: 2px solid #e8e8e8;
+  white-space: nowrap;
+}
+.batch-edit-table th.col-qty { width: 108px; }
+.batch-edit-table th.col-op { width: 72px; }
+.batch-edit-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #f0f0f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-edit-table tr.row-fail { background: #fff5f5; }
+.batch-edit-table .cell-input-num { width: 88px; }
+
+.batch-edit-add { margin: 12px 0 4px; }
+.batch-edit-picker { width: 100%; }
+.batch-edit-picker .searchable-select-input { width: 100%; }
+
+.batch-edit-failures {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+/* 明细行的发货状态 */
+.tag-frozen {
+  background: #fff7ed;
+  color: #b45309;
+}
+/* 批次行「N 已发货」提示，解释按钮为何置灰 */
+.batch-shipped-hint {
+  display: block;
+  font-style: normal;
+  font-size: 11px;
+  color: #4338ca;
+}

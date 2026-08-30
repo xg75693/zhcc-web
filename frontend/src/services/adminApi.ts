@@ -28,7 +28,12 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     throw new Error('登录已过期');
   }
   const json = await res.json();
-  if (json.error) throw new Error(json.error);
+  if (json.error) {
+    // 整单保存这类接口会回传 details（逐项失败原因），挂到 Error 上别丢了
+    const err = new Error(json.error) as Error & { details?: unknown };
+    if (json.details !== undefined) err.details = json.details;
+    throw err;
+  }
   return json.data;
 }
 
@@ -348,6 +353,42 @@ export interface AdminInquiryRecord {
   downstream_customer_name: string | null;
   batch_result: string | null;
   create_time: string;
+  /** 关联冻结已被一键备份标为 shipped：库存已扣、已进报表，整单禁止改删 */
+  has_shipped: number;
+  /** 当前仍处于 active 的冻结量 */
+  active_freeze_qty: number;
+}
+
+/** 整单保存失败时，后端回传的逐项缺口 */
+export interface InquiryBatchFailure {
+  product_id: number;
+  product_name: string | null;
+  warehouse_code?: string;
+  request_qty?: number;
+  available_qty?: number;
+  reason: string;
+}
+
+/**
+ * 整单编辑：提交这个批次最终应包含哪些商品、各订多少。
+ * 不在 items 里的原有商品即视为删除。全部商品可订才会保存，
+ * 有一项不足则整单拒绝，错误对象上带 details 说明每项缺口。
+ */
+export async function updateAdminInquiryBatch(
+  batchId: string,
+  items: { product_id: number; request_qty: number }[]
+): Promise<{ success: boolean; added: number; updated: number; removed: number }> {
+  return request(`${BASE}/inquiry-batches/${encodeURIComponent(batchId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ items }),
+  });
+}
+
+/** 删除整单咨询记录及其全部商品行，连带释放冻结 */
+export async function deleteAdminInquiryBatch(
+  batchId: string
+): Promise<{ success: boolean; deleted: number; released_freezes: number }> {
+  return request(`${BASE}/inquiry-batches/${encodeURIComponent(batchId)}`, { method: 'DELETE' });
 }
 
 export async function fetchAdminInquiryRecords(params?: {

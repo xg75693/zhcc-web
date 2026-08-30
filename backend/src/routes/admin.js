@@ -1345,10 +1345,21 @@ router.get('/inquiry-records', authMiddleware, async (req, res) => {
       `SELECT COUNT(*) as total FROM zhcc_inquiry_record ir WHERE ${where}`, params
     );
 
+    // 带出冻结状态：已发货的记录不能再改删，前端据此置灰按钮
     const [records] = await pool.query(
-      `SELECT ir.*, c.customer_name 
+      `SELECT ir.*, c.customer_name,
+              COALESCE(f.has_shipped, 0)       AS has_shipped,
+              COALESCE(f.active_freeze_qty, 0) AS active_freeze_qty
        FROM zhcc_inquiry_record ir
        LEFT JOIN zhcc_customer c ON ir.customer_code = c.customer_code
+       LEFT JOIN (
+         SELECT inquiry_id,
+                MAX(status = 'shipped') AS has_shipped,
+                SUM(CASE WHEN status = 'active' THEN freeze_qty ELSE 0 END) AS active_freeze_qty
+         FROM zhcc_stock_freeze
+         WHERE inquiry_id IS NOT NULL
+         GROUP BY inquiry_id
+       ) f ON f.inquiry_id = ir.id
        WHERE ${where}
        ORDER BY ir.id DESC
        LIMIT ? OFFSET ?`,
@@ -1397,8 +1408,6 @@ router.get('/inquiry-records', authMiddleware, async (req, res) => {
  *
  * 冻结记录直接删除而非标记 cancelled：咨询记录都没了，留下指向不存在
  * inquiry_id 的行只会变成孤儿数据。
- *
- * 注：前端咨询记录页当前为只读，未接入此接口。
  */
 router.delete('/inquiry-records/:id', authMiddleware, async (req, res) => {
   const conn = await pool.getConnection();
@@ -1429,6 +1438,253 @@ router.delete('/inquiry-records/:id', authMiddleware, async (req, res) => {
   } catch (err) {
     await conn.rollback();
     console.error('[DELETE INQUIRY RECORD ERROR]', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
+  }
+});
+
+// ===== 咨询批次（整单）编辑与删除 =====
+
+/**
+ * 取批次内已发货的商品名。
+ *
+ * 只要有一个商品发过货，整单就锁定——不做「只改未发货的那几行」这种部分编辑。
+ * 已发货意味着库存已扣、已进导出报表和备份快照，同一单里一半可改一半不可改，
+ * 账目会对不上，数据完整性守不住。
+ */
+async function shippedProductsOfBatch(conn, batchId) {
+  const [rows] = await conn.query(
+    `SELECT DISTINCT COALESCE(ir.product_name, ir.warehouse_code) AS name
+     FROM zhcc_stock_freeze sf
+     JOIN zhcc_inquiry_record ir ON ir.id = sf.inquiry_id
+     WHERE ir.batch_id = ? AND sf.status = 'shipped'`,
+    [batchId]
+  );
+  return rows.map(r => r.name);
+}
+
+/**
+ * PUT /inquiry-batches/:batchId
+ *
+ * 整单编辑：一次提交这个批次最终应该包含哪些商品、各订多少。
+ *   body: { items: [{ product_id, request_qty }, ...] }
+ *   不在 items 里的原有商品即视为删除，新出现的即新增，已有的按新数量更新。
+ *
+ * 保存前会对【全部】商品重做一次可订性判定，与下单时的口径一致——
+ * 全部可订才落库，有一个不足就整单拒绝并回传每项的缺口，不做部分保存。
+ *
+ * 可用结余的算法要点：必须排除【本批次自己】现有的冻结。
+ * 本批次的冻结在这次保存中会被整体重算，若把它算进占用，
+ * 等于自己和自己抢库存，原样提交都会失败。
+ *
+ * 落库采用 diff 而非先删后插，保留未变动商品的记录 id 与 create_time
+ * （create_time 是「咨询时间」，不该因为一次编辑就跳到今天）。
+ */
+router.put('/inquiry-batches/:batchId', authMiddleware, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    const batchId = req.params.batchId;
+    const items = Array.isArray(req.body.items) ? req.body.items : null;
+    if (!items || items.length === 0) {
+      return res.status(400).json({ error: '至少保留一个商品，若要清空请直接删除整单' });
+    }
+
+    await conn.beginTransaction();
+
+    const [existing] = await conn.query(
+      'SELECT * FROM zhcc_inquiry_record WHERE batch_id = ? ORDER BY id', [batchId]
+    );
+    if (existing.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: '咨询记录不存在' });
+    }
+    const shipped = await shippedProductsOfBatch(conn, batchId);
+    if (shipped.length > 0) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: `该咨询记录已有商品发货（${shipped.join('、')}），整单不能修改`,
+      });
+    }
+
+    const head = existing[0];   // 批次公共信息：客户、收货单位、咨询日期
+
+    // --- 入参规范化：数量必须为正整数，同一商品不能重复 ---
+    const seen = new Set();
+    const wanted = [];
+    for (const raw of items) {
+      const productId = parseInt(raw.product_id);
+      const qty = Number(raw.request_qty);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        await conn.rollback();
+        return res.status(400).json({ error: '存在无效的商品' });
+      }
+      if (!Number.isInteger(qty) || qty <= 0) {
+        await conn.rollback();
+        return res.status(400).json({ error: '订货数量必须是大于 0 的整数' });
+      }
+      if (seen.has(productId)) {
+        await conn.rollback();
+        return res.status(400).json({ error: '同一商品在单据中重复出现，请合并为一行' });
+      }
+      seen.add(productId);
+      wanted.push({ productId, qty });
+    }
+
+    // --- 逐项校验可订性，全部通过才继续 ---
+    const failures = [];
+    const resolved = [];
+    for (const w of wanted) {
+      const [prodRows] = await conn.query(
+        'SELECT * FROM zhcc_product WHERE id = ? AND customer_code = ?',
+        [w.productId, head.customer_code]
+      );
+      if (prodRows.length === 0) {
+        failures.push({ product_id: w.productId, product_name: null, reason: '商品不存在或不属于该客户' });
+        continue;
+      }
+      const product = prodRows[0];
+
+      // 其他批次占用的 active 冻结（排除本批次，它马上要被重算）
+      const [[occ]] = await conn.query(
+        `SELECT COALESCE(SUM(sf.freeze_qty), 0) AS other_frozen
+         FROM zhcc_stock_freeze sf
+         WHERE sf.product_id = ? AND sf.status = 'active'
+           AND (sf.batch_id IS NULL OR sf.batch_id <> ?)`,
+        [w.productId, batchId]
+      );
+      const otherFrozen = Number(occ.other_frozen) || 0;
+      const available = Number(product.stock_qty) - otherFrozen;
+
+      if (w.qty > available) {
+        failures.push({
+          product_id: w.productId,
+          product_name: product.product_name,
+          warehouse_code: product.warehouse_code,
+          request_qty: w.qty,
+          available_qty: available,
+          reason: `可用结余 ${available}，订货数量 ${w.qty}`,
+        });
+        continue;
+      }
+      resolved.push({ ...w, product, stockQty: Number(product.stock_qty), otherFrozen, available });
+    }
+
+    if (failures.length > 0) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: '存在不可订的商品，整单未保存',
+        details: failures,
+      });
+    }
+
+    // --- diff 落库 ---
+    const byProduct = new Map(existing.map(r => [r.product_id, r]));
+    const keptIds = new Set();
+    let added = 0, updated = 0;
+
+    for (const r of resolved) {
+      const old = byProduct.get(r.productId);
+      if (old) {
+        keptIds.add(old.id);
+        await conn.query(
+          `UPDATE zhcc_inquiry_record
+           SET request_qty = ?, stock_qty = ?, frozen_qty = ?, available_qty = ?,
+               warehouse_code = ?, customer_product_code = ?, product_name = ?,
+               result = 'approved', batch_result = 'approved', update_time = NOW(3)
+           WHERE id = ?`,
+          [r.qty, r.stockQty, r.otherFrozen, r.available,
+           r.product.warehouse_code, r.product.customer_product_code, r.product.product_name, old.id]
+        );
+        // 冻结按新数量重算：有就改，没有（原本 rejected 未冻结）就补
+        const [fz] = await conn.query(
+          `UPDATE zhcc_stock_freeze SET freeze_qty = ?, freeze_date = ?, update_time = NOW(3)
+           WHERE inquiry_id = ? AND status = 'active'`,
+          [r.qty, head.inquiry_date, old.id]
+        );
+        if (fz.affectedRows === 0) {
+          await conn.query(
+            `INSERT INTO zhcc_stock_freeze
+              (product_id, warehouse_code, customer_code, freeze_qty, inquiry_id, batch_id, freeze_date, status, create_time, update_time)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NOW(3), NOW(3))`,
+            [r.productId, r.product.warehouse_code, head.customer_code, r.qty, old.id, batchId, head.inquiry_date]
+          );
+        }
+        updated++;
+      } else {
+        const [ins] = await conn.query(
+          `INSERT INTO zhcc_inquiry_record
+            (batch_id, customer_code, downstream_customer_id, downstream_customer_name, product_id,
+             warehouse_code, customer_product_code, product_name, request_qty, stock_qty, frozen_qty,
+             available_qty, result, batch_result, inquiry_date, create_time, update_time)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'approved', ?, ?, NOW(3))`,
+          [batchId, head.customer_code, head.downstream_customer_id, head.downstream_customer_name,
+           r.productId, r.product.warehouse_code, r.product.customer_product_code, r.product.product_name,
+           r.qty, r.stockQty, r.otherFrozen, r.available, head.inquiry_date, head.create_time]
+        );
+        await conn.query(
+          `INSERT INTO zhcc_stock_freeze
+            (product_id, warehouse_code, customer_code, freeze_qty, inquiry_id, batch_id, freeze_date, status, create_time, update_time)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NOW(3), NOW(3))`,
+          [r.productId, r.product.warehouse_code, head.customer_code, r.qty, ins.insertId, batchId, head.inquiry_date]
+        );
+        keptIds.add(ins.insertId);
+        added++;
+      }
+    }
+
+    // 本次没提交的原有商品 = 用户删掉的行，连带清冻结
+    const removedIds = existing.map(r => r.id).filter(id => !keptIds.has(id));
+    if (removedIds.length > 0) {
+      await conn.query('DELETE FROM zhcc_stock_freeze WHERE inquiry_id IN (?)', [removedIds]);
+      await conn.query('DELETE FROM zhcc_inquiry_record WHERE id IN (?)', [removedIds]);
+    }
+
+    await conn.commit();
+    res.json({ data: { success: true, added, updated, removed: removedIds.length } });
+  } catch (err) {
+    await conn.rollback();
+    console.error('[UPDATE INQUIRY BATCH ERROR]', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/**
+ * DELETE /inquiry-batches/:batchId
+ * 删除整单咨询记录及其全部商品行，连带清掉占用的冻结（可用量随之释放）。
+ * 与单条删除同理：不动 stock_qty，因为 active 冻结从未扣减过库存。
+ * 批次内只要有一条已发货就整单拒绝，避免删一半留一半的中间状态。
+ */
+router.delete('/inquiry-batches/:batchId', authMiddleware, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    const batchId = req.params.batchId;
+    await conn.beginTransaction();
+
+    const [rows] = await conn.query('SELECT id FROM zhcc_inquiry_record WHERE batch_id = ?', [batchId]);
+    if (rows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: '咨询记录不存在' });
+    }
+    const shipped = await shippedProductsOfBatch(conn, batchId);
+    if (shipped.length > 0) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: `该咨询记录已有商品发货（${shipped.join('、')}），整单不能删除`,
+      });
+    }
+
+    const ids = rows.map(r => r.id);
+    const [fz] = await conn.query('DELETE FROM zhcc_stock_freeze WHERE inquiry_id IN (?)', [ids]);
+    await conn.query('DELETE FROM zhcc_inquiry_record WHERE id IN (?)', [ids]);
+
+    await conn.commit();
+    res.json({ data: { success: true, deleted: ids.length, released_freezes: fz.affectedRows } });
+  } catch (err) {
+    await conn.rollback();
+    console.error('[DELETE INQUIRY BATCH ERROR]', err);
     res.status(500).json({ error: err.message });
   } finally {
     conn.release();
