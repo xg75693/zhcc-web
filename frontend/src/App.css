@@ -270,53 +270,6 @@ body {
   gap: 12px;
 }
 
-.total-badge {
-  font-size: 13px;
-  font-weight: 400;
-  color: #888;
-}
-
-.empty-hint {
-  text-align: center;
-  color: #999;
-  padding: 40px 0;
-  font-size: 14px;
-}
-
-.table-wrapper {
-  overflow-x: auto;
-}
-
-.history-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.history-table th {
-  background: #fafafa;
-  padding: 10px 12px;
-  text-align: left;
-  font-weight: 600;
-  color: #666;
-  border-bottom: 2px solid #e8e8e8;
-  white-space: nowrap;
-}
-
-.history-table td {
-  padding: 10px 12px;
-  border-bottom: 1px solid #f0f0f0;
-}
-
-.history-table tr:hover {
-  background: #f9f9f9;
-}
-
-.mono {
-  font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 12px;
-}
-
 .product-name {
   /* 原有 max-width: 200px 会把商品名硬截断，而行内右侧还空着一大片，已移除。
      min-width: 0 让它在窄屏真的放不下时才收缩省略，而不是撑破容器 */
@@ -379,11 +332,6 @@ body {
 .pagination button:disabled {
   color: #ccc;
   cursor: not-allowed;
-}
-
-.page-info {
-  font-size: 13px;
-  color: #666;
 }
 
 /* Multi-select Product List */
@@ -475,12 +423,6 @@ body {
   color: #888;
 }
 
-.product-stock {
-  margin-left: auto;
-  color: #52c41a;
-  font-weight: 600;
-}
-
 .qty-input {
   display: flex;
   align-items: center;
@@ -523,28 +465,6 @@ body {
 }
 
 /* Batch Results */
-.results-section {
-  margin-top: 20px;
-}
-
-.results-section h3 {
-  font-size: 18px;
-  color: #1a1a2e;
-  margin-bottom: 12px;
-}
-
-.results-summary {
-  padding: 10px 14px;
-  background: #f6f8fa;
-  border-radius: 8px;
-  font-size: 14px;
-  color: #555;
-  margin-bottom: 12px;
-  display: flex;
-  gap: 16px;
-  align-items: center;
-}
-
 .approved-count {
   color: #389e0d;
   font-weight: 600;
@@ -1712,34 +1632,6 @@ body {
   margin: 8px 0;
 }
 
-.backup-steps {
-  margin: 12px 0;
-  padding-left: 20px;
-  font-size: 14px;
-  color: #374151;
-  line-height: 1.8;
-}
-.backup-steps code {
-  background: #f3f4f6;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 13px;
-}
-
-.backup-warning-text {
-  color: #dc2626;
-  font-weight: 600;
-  font-size: 14px;
-  margin: 12px 0 4px;
-}
-
-.backup-final-confirm {
-  font-size: 16px;
-  font-weight: 600;
-  color: #dc2626;
-  margin: 8px 0;
-}
-
 .backup-actions {
   display: flex;
   gap: 12px;
@@ -1881,25 +1773,6 @@ body {
   border-radius: 4px;
   font-size: 13px;
 }
-
-/* 咨询记录管理 - 危险操作小按钮 */
-.btn-small {
-  padding: 3px 8px;
-  border-radius: 4px;
-  border: 1px solid;
-  font-size: 12px;
-  cursor: pointer;
-}
-.btn-danger-small {
-  border-color: #fca5a5;
-  background: #fef2f2;
-  color: #dc2626;
-}
-.btn-danger-small:hover {
-  background: #fee2e2;
-  border-color: #f87171;
-}
-
 
 /* ===== 类别管理弹窗 ===== */
 .category-modal {

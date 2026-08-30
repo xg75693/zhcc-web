@@ -82,10 +82,6 @@ export async function createDownstreamCustomer(params: {
   return json.data;
 }
 
-export async function deleteDownstreamCustomer(id: number): Promise<void> {
-  await fetch(`${BASE}/inquiry/downstream-customers/${id}`, { method: 'DELETE' });
-}
-
 export async function confirmInquiry(batchId: string): Promise<{ confirmed: boolean }> {
   const res = await fetch(`${BASE}/inquiry/confirm/${batchId}`, { method: 'POST' });
   const json = await res.json();

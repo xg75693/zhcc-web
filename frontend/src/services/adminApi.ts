@@ -23,7 +23,8 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   if (res.status === 401) {
     localStorage.removeItem('admin_token');
     localStorage.removeItem('admin_user');
-    window.location.href = '/admin';
+    // 必须带上 BASE_URL：生产部署在 /zhcc/ 子路径下，写死 /admin 会跳到 404
+    window.location.href = `${import.meta.env.BASE_URL}admin`.replace(/\/{2,}/g, '/');
     throw new Error('登录已过期');
   }
   const json = await res.json();
@@ -316,26 +317,6 @@ export interface BackupResult {
   total_released_qty: number;
 }
 
-export interface BackupDateSummary {
-  backup_date: string;
-  product_count: number;
-}
-
-export interface ProductBackupRecord {
-  id: number;
-  backup_date: string;
-  product_id: number;
-  warehouse_code: string;
-  customer_code: string;
-  customer_product_code: string | null;
-  product_name: string | null;
-  spec: string | null;
-  stock_qty: number;
-  frozen_qty: number;
-  remark: string | null;
-  customer_name: string | null;
-}
-
 export async function fetchBackupCandidates(): Promise<BackupCandidates> {
   return request(`${BASE}/backup-candidates`);
 }
@@ -345,11 +326,6 @@ export async function executeBackup(selectedInquiryIds: number[]): Promise<Backu
     method: 'POST',
     body: JSON.stringify({ selected_inquiry_ids: selectedInquiryIds }),
   });
-}
-
-export async function fetchBackups(backupDate?: string): Promise<{ records: ProductBackupRecord[]; backup_dates: BackupDateSummary[] }> {
-  const qs = backupDate ? `?backup_date=${encodeURIComponent(backupDate)}` : '';
-  return request(`${BASE}/backups${qs}`);
 }
 
 // ===== 咨询记录管理 =====
@@ -390,6 +366,3 @@ export async function fetchAdminInquiryRecords(params?: {
   return request(`${BASE}/inquiry-records?${searchParams}`);
 }
 
-export async function deleteAdminInquiryRecord(id: number): Promise<{ success: boolean }> {
-  return request(`${BASE}/inquiry-records/${id}`, { method: 'DELETE' });
-}
