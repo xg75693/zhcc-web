@@ -136,7 +136,7 @@ export async function createDownstreamCustomerIfNeeded(customerCode, name) {
 
 export async function matchProducts(rows, customerCode) {
   const [products] = await pool.query(
-    'SELECT id, customer_product_code, product_name, spec FROM zhcc_product WHERE customer_code = ?',
+    'SELECT id, warehouse_code, customer_product_code, product_name, spec FROM zhcc_product WHERE customer_code = ?',
     [customerCode]
   );
   const productMap = new Map();

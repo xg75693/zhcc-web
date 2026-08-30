@@ -38,7 +38,10 @@ function verifyToken(token) {
     const data = Buffer.from(dataB64, 'base64').toString();
     const expected = createHmac('sha256', ADMIN_SECRET).update(data).digest('hex');
     if (sig !== expected) return null;
-    return JSON.parse(data);
+    const payload = JSON.parse(data);
+    // 签发时写了 exp，这里必须比对，否则 token 永久有效
+    if (typeof payload.exp === 'number' && Date.now() >= payload.exp) return null;
+    return payload;
   } catch {
     return null;
   }
@@ -883,6 +886,15 @@ router.put('/products/:id', authMiddleware, async (req, res) => {
     const qty = Number(stock_qty) || 0;
 
     await conn.beginTransaction();
+
+    // 先取原值，用于判断结存是否被手工改动
+    const [beforeRows] = await conn.query('SELECT stock_qty FROM zhcc_product WHERE id = ?', [req.params.id]);
+    if (beforeRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: '商品不存在' });
+    }
+    const before = beforeRows[0];
+
     const categoryId = await resolveCategoryId(conn, customer_code, category_id);
     await conn.query(
       `UPDATE zhcc_product SET
@@ -892,6 +904,25 @@ router.put('/products/:id', authMiddleware, async (req, res) => {
       [warehouse_code, customer_code || '', customer_product_code || '', product_name || '', spec || '', categoryId, qty, req.params.id]
     );
 
+    // --- 结存被手工改动：写一条「库存调整」快照 ---
+    // 手工改是直接赋值、不像入库单那样有凭证，不留快照的话既无从追溯，
+    // 报表的期初结存也会停在历史值与当前库存对不上。
+    // 副作用要清楚：快照按当前时刻落库，所以月中调整会让【本月】报表的期初
+    // 变成调整后的值（期初取的是「截止次月1日的最近一次备份」）。
+    const stockAdjusted = qty !== Number(before.stock_qty);
+    if (stockAdjusted) {
+      await conn.query(
+        `INSERT INTO zhcc_product_backup
+          (backup_date, product_id, warehouse_code, customer_code, customer_product_code,
+           product_name, spec, stock_qty, frozen_qty, remark, create_time)
+         SELECT ?, p.id, p.warehouse_code, p.customer_code, p.customer_product_code,
+                p.product_name, p.spec, p.stock_qty, 0, ?, NOW(3)
+         FROM zhcc_product p WHERE p.id = ?`,
+        [localDateTime(), `库存调整 ${before.stock_qty} → ${qty}`, req.params.id]
+      );
+    }
+
+    // --- 兜底：历史遗留商品在备份表里一条记录都没有，补一条建档期初 ---
     const [had] = await conn.query(
       'SELECT 1 FROM zhcc_product_backup WHERE product_id = ? LIMIT 1',
       [req.params.id]
@@ -911,7 +942,7 @@ router.put('/products/:id', authMiddleware, async (req, res) => {
     }
 
     await conn.commit();
-    res.json({ data: { success: true, category_id: categoryId, opening_backfilled: backfilled } });
+    res.json({ data: { success: true, category_id: categoryId, opening_backfilled: backfilled, stock_adjusted: stockAdjusted } });
   } catch (err) {
     await conn.rollback();
     if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: '仓储商品号已存在' });
@@ -921,12 +952,31 @@ router.put('/products/:id', authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * DELETE /products/:id
+ *
+ * 连带清理两类会变成孤儿的数据：
+ *   zhcc_product_backup —— 期初结存快照，商品没了就失去意义
+ *   zhcc_stock_freeze   —— 孤儿 active 冻结会继续占用可用量，危害更实在
+ * 入库单与咨询记录属于业务凭证，保留不删（导出按客户查商品，不会带出它们）。
+ */
 router.delete('/products/:id', authMiddleware, async (req, res) => {
+  const conn = await pool.getConnection();
   try {
-    await pool.query('DELETE FROM zhcc_product WHERE id = ?', [req.params.id]);
-    res.json({ data: { success: true } });
+    const id = req.params.id;
+    await conn.beginTransaction();
+    const [backup] = await conn.query('DELETE FROM zhcc_product_backup WHERE product_id = ?', [id]);
+    const [freeze] = await conn.query('DELETE FROM zhcc_stock_freeze WHERE product_id = ?', [id]);
+    await conn.query('DELETE FROM zhcc_product WHERE id = ?', [id]);
+    await conn.commit();
+    res.json({
+      data: { success: true, removed_backups: backup.affectedRows, removed_freezes: freeze.affectedRows },
+    });
   } catch (err) {
+    await conn.rollback();
     res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
   }
 });
 
@@ -1336,7 +1386,19 @@ router.get('/inquiry-records', authMiddleware, async (req, res) => {
 
 /**
  * DELETE /inquiry-records/:id
- * 删除单条咨询记录，同时回退对应的库存冻结
+ * 删除单条咨询记录，连带删除其关联冻结（释放可用量）。
+ *
+ * 这里的口径必须和下单流程对齐：
+ *   下单通过 → 写 inquiry_record + freeze(active)，此时【不扣】product.stock_qty
+ *   一键备份 → freeze 转 shipped + 扣减 stock_qty + 写 backup 快照
+ * 所以删除 active 阶段的记录只需清掉冻结、【不能动 stock_qty】——库存压根没扣过，
+ * 加回去反而凭空多货。而已转 shipped 的记录库存已扣、已进报表和备份快照，
+ * 再删就会让账对不上，一律拒绝。
+ *
+ * 冻结记录直接删除而非标记 cancelled：咨询记录都没了，留下指向不存在
+ * inquiry_id 的行只会变成孤儿数据。
+ *
+ * 注：前端咨询记录页当前为只读，未接入此接口。
  */
 router.delete('/inquiry-records/:id', authMiddleware, async (req, res) => {
   const conn = await pool.getConnection();
@@ -1344,37 +1406,26 @@ router.delete('/inquiry-records/:id', authMiddleware, async (req, res) => {
     await conn.beginTransaction();
     const id = parseInt(req.params.id);
 
-    // 查询该记录
-    const [rows] = await conn.query(
-      'SELECT * FROM zhcc_inquiry_record WHERE id = ?', [id]
-    );
+    const [rows] = await conn.query('SELECT id FROM zhcc_inquiry_record WHERE id = ?', [id]);
     if (rows.length === 0) {
       await conn.rollback();
       return res.status(404).json({ error: '记录不存在' });
     }
-    const rec = rows[0];
 
-    // 如果该记录结果是通过的（可订），需要回退冻结
-    if (rec.result === 'approved' && rec.freeze_qty > 0) {
-      // 查找对应的冻结记录并回退
-      await conn.query(
-        `UPDATE zhcc_stock_freeze 
-         SET status = 'cancelled', update_time = NOW(3)
-         WHERE inquiry_record_id = ? AND status = 'active'`,
-        [id]
-      );
-      // 恢复商品库存
-      await conn.query(
-        'UPDATE zhcc_product SET stock_qty = stock_qty + ?, update_time = NOW(3) WHERE id = ?',
-        [rec.freeze_qty, rec.product_id]
-      );
+    const [shipped] = await conn.query(
+      `SELECT 1 FROM zhcc_stock_freeze WHERE inquiry_id = ? AND status = 'shipped' LIMIT 1`,
+      [id]
+    );
+    if (shipped.length > 0) {
+      await conn.rollback();
+      return res.status(400).json({ error: '该记录已发货，不能删除' });
     }
 
-    // 删除咨询记录
+    const [freeze] = await conn.query('DELETE FROM zhcc_stock_freeze WHERE inquiry_id = ?', [id]);
     await conn.query('DELETE FROM zhcc_inquiry_record WHERE id = ?', [id]);
 
     await conn.commit();
-    res.json({ data: { success: true } });
+    res.json({ data: { success: true, released_freezes: freeze.affectedRows } });
   } catch (err) {
     await conn.rollback();
     console.error('[DELETE INQUIRY RECORD ERROR]', err);
